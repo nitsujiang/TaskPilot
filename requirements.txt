@@ -1,0 +1,7 @@
+google-generativeai
+chromadb
+sqlite3 
+python-dotenv
+requests
+slack-sdk
+google-api-python-client
