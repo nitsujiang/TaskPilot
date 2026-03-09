@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+google-api-python-client
+google-auth
+google-auth-oauthlib
+psycopg2-binary
