@@ -1,6 +1,7 @@
-google-generativeai
-chromadb
-python-dotenv
-requests
-slack-sdk
+fastapi
 google-api-python-client
+google-auth
+google-auth-oauthlib
+psycopg2-binary
+python-dotenv
+uvicorn[standard]
