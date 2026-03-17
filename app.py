@@ -1,10 +1,14 @@
 from flask import Flask, request, jsonify
-from agent.agent import process_message
+from agent.agent import process_message,generate_clarifying_question
 import re
+from databases.db import save_task,run_agent,init_db
+import threading
 
 processed_events = set()
 
 app = Flask(__name__)
+
+init_db()
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
@@ -41,12 +45,34 @@ def slack_events():
 
             processed_events.add(event_id)
 
-            task_data = process_message(cleaned_text)
+            def handle_task(cleaned_text):
+                try:
+                    print("Processing message:", cleaned_text)
 
-            print("\nReturned task data:")
-            print(task_data)
+                    task_data = process_message(cleaned_text)
 
-    return "", 200
+                    action = run_agent(task_data)
+
+                    if action == "store":
+                        save_task(task_data)
+                        print("Task saved")
+
+                    elif action == "clarify":
+                        try:
+                            question = generate_clarifying_question(task_data)
+                            print("Clarification:", question)
+                        except Exception as e:
+                            print("LLM quota hit (clarification skipped):", e)
+
+                    print("\nReturned task data:")
+                    print(task_data)
+
+                except Exception as e:
+                    print("LLM ERROR:", e)
+
+
+            threading.Thread(target=handle_task, args=(cleaned_text,)).start()
+            return "", 200
 
 
 if __name__ == "__main__":
