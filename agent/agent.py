@@ -54,31 +54,21 @@ def generate_clarifying_question(task_data: dict) -> str:
     return text.strip()
 
 
-# def process_message(message: str):
-#     """
-#     Main function -- takes a message and decides what to do.
-#     """
-#     print(f"Processing message: {message}\n")
+def process_message(message: str):
+    """
+    Main function -- takes a message and decides what to do.
+    """
+    print(f"Processing message: {message}\n")
 
-#     task_data = extract_task(message)
-#     print(f"Extracted: {json.dumps(task_data, indent=2)}\n")
+    task_data = extract_task(message)
+    print(f"Extracted: {json.dumps(task_data, indent=2)}\n")
 
-#     if needs_clarification(task_data):
-#         question = generate_clarifying_question(task_data)
-#         print(f"Clarifying question to post in Slack:\n{question}")
-#     else:
-#         print("All details present -- ready to save to database and send reminders")
+    if needs_clarification(task_data):
+        question = generate_clarifying_question(task_data)
+        print(f"Clarifying question to post in Slack:\n{question}")
+    else:
+        print("All details present -- ready to save to database and send reminders")
 
-#     return task_data
+    return task_data
 
-def process_message(message):
-    print(" USING MOCK LLM just for testing ")
 
-    return {
-        "task": "Submit unit tests",
-        "owner": "MERON",
-        "deadline": "2026-03-20",
-        "status": "pending",
-        "urgency": "medium",
-        "missing_info": []
-    }
