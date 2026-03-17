@@ -3,9 +3,11 @@ from dotenv import load_dotenv
 from agent.prompts import TASK_EXTRACTION_PROMPT, CLARIFYING_QUESTION_PROMPT
 import os
 import json
-
+from slack_sdk import WebClient
 load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+
+slack_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 def extract_task(message: str) -> dict:
@@ -65,7 +67,11 @@ def process_message(message: str):
 
     if needs_clarification(task_data):
         question = generate_clarifying_question(task_data)
-        print(f"Clarifying question to post in Slack:\n{question}")
+
+        slack_client.chat_postMessage(
+        channel=event["channel"],
+        text=question
+    )
     else:
         print("All details present -- ready to save to database and send reminders")
 
