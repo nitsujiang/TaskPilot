@@ -15,4 +15,6 @@ __pycache__/
 # Local token/db files
 token_*.json
 profiles.db
-EOF
+
+# IDE/editor settings
+.vscode
