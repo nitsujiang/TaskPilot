@@ -1,7 +1,7 @@
 import sys
 
 sys.path.append("..")
-from agent.agent import process_message
+from agent.parser import process_message
 
 # Test 1: Vague message (should trigger clarifying question)
 print("=== TEST 1: Vague Message ===")

@@ -6,4 +6,5 @@ CREATE TABLE tasks (
     status TEXT,
     urgency TEXT,
     created_at TEXT
+    -- TODO: add attendees column when meeting scheduling is implemented
 );
