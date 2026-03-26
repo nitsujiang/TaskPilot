@@ -127,10 +127,13 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
     if not new_data:
         return task_data
 
-    # Merge — overwrite any field that Gemini found in the reply -> this allows users to change previous info
-    for field in ["task", "title", "description", "deadline", "urgency"]:
+    # Merge — overwrite fields found in reply.
+    # Keep task type stable once established to avoid flipping meeting <-> todo on short clarifications.
+    for field in ["title", "description", "deadline", "urgency"]:
         if new_data.get(field) is not None:
             task_data[field] = new_data[field]
+    if new_data.get("task") and not task_data.get("task"):
+        task_data["task"] = new_data["task"]
 
     # Owners — append new owners rather than replace
     if new_data.get("owners"):

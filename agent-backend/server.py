@@ -31,6 +31,7 @@ app = FastAPI()
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.email",
     "openid",
 ]
@@ -251,8 +252,11 @@ def calendar_list(request: Request, profile: str, max_results: int = 10):
 
     events = events_result.get("items", [])
     return [
-        {"summary": e.get("summary", "(no title)"),
-         "start": e["start"].get("dateTime", e["start"].get("date"))}
+        {
+            "summary": e.get("summary", "(no title)"),
+            "start": e["start"].get("dateTime", e["start"].get("date")),
+            "end": e["end"].get("dateTime", e["end"].get("date")),
+        }
         for e in events
     ]
 
@@ -270,6 +274,36 @@ def drive_search(request: Request, profile: str, query: str):
 
     items = results.get("files", [])
     return [{"name": it["name"], "id": it["id"]} for it in items]
+
+@app.post("/calendar/create")
+def calendar_create(
+    request: Request,
+    profile: str,
+    summary: str,
+    start_iso: str,
+    end_iso: str,
+    description: str = "",
+    timezone_name: str = "UTC",
+):
+    """Create a calendar event for a connected profile."""
+    require_key(request)
+    creds = ensure_fresh(load_creds(profile))
+    service = build("calendar", "v3", credentials=creds)
+
+    body = {
+        "summary": summary.strip() or "(no title)",
+        "description": description or "",
+        "start": {"dateTime": start_iso, "timeZone": timezone_name},
+        "end": {"dateTime": end_iso, "timeZone": timezone_name},
+    }
+    ev = service.events().insert(calendarId="primary", body=body).execute()
+    return {
+        "id": ev.get("id"),
+        "htmlLink": ev.get("htmlLink"),
+        "summary": ev.get("summary"),
+        "start": ev.get("start", {}).get("dateTime"),
+        "end": ev.get("end", {}).get("dateTime"),
+    }
 
 
 @app.get("/profiles/check")
