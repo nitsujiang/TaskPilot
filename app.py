@@ -200,7 +200,11 @@ def _calendar_create(
 
 def _iso_to_dt(iso_text: str) -> datetime:
     # Support Google-style UTC timestamps ending with Z.
-    return datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+    # Normalize naive datetimes (e.g., all-day events) to UTC so comparisons are valid.
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return dt
 
 def _format_conflicts(conflicts: list[dict]) -> str:
     if not conflicts:
