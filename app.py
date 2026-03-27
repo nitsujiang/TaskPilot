@@ -70,12 +70,23 @@ sessions = {}
 MAX_SESSIONS = 500
 SESSION_TIMEOUT = 60
 meeting_followups = {}
+materials_sessions = {}
 
 
 class BookingWindow(BaseModel):
     can_book: bool = False
     start_iso: Optional[str] = None
     end_iso: Optional[str] = None
+
+
+def _extract_urls(text: str) -> list[str]:
+    urls = re.findall(r"(https?://[^\s>]+)", text)
+    # Strip trailing punctuation common in chat.
+    cleaned = []
+    for u in urls:
+        cleaned.append(u.rstrip(").,;!?>\"'"))
+    # de-dupe preserving order
+    return list(dict.fromkeys(cleaned))
 
 
 def _fixed_offset_for_timezone(timezone: str) -> str:
@@ -168,6 +179,16 @@ def _drive_search(profile_email: str, query: str, page_size: int = 10) -> list[d
     r = requests.get(
         f"{_backend_base()}/drive/search",
         params={"profile": profile_email, "query": query},
+        headers=_backend_headers(),
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
+
+def _calendar_update_description(profile_email: str, event_id: str, description: str) -> dict:
+    r = requests.post(
+        f"{_backend_base()}/calendar/update_description",
+        params={"profile": profile_email, "event_id": event_id, "description": description},
         headers=_backend_headers(),
         timeout=30,
     )
@@ -267,6 +288,69 @@ def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str
         thread_ts=thread_ts,
     )
 
+
+def _drive_query_from_task(title: str, description: str) -> str:
+    bits = []
+    if title:
+        bits.append(title)
+    if description:
+        bits.append(description)
+    q = " ".join(bits).strip()
+    return q[:180] if len(q) > 180 else q
+
+
+def _render_drive_results(items: list[dict]) -> str:
+    if not items:
+        return "No matching files found."
+    lines = []
+    for i, it in enumerate(items[:5], start=1):
+        name = it.get("name") or "(unnamed)"
+        link = it.get("webViewLink") or (f"https://drive.google.com/open?id={it.get('id')}" if it.get("id") else "")
+        lines.append(f"{i}. {name}" + (f"\n   {link}" if link else ""))
+    return "\n".join(lines)
+
+
+def _build_materials_description(base_description: str, pasted_links: list[str], selected_drive_items: list[dict]) -> str:
+    base = (base_description or "").strip()
+    lines = [base] if base else []
+    materials = []
+    for u in pasted_links:
+        materials.append(f"- {u}")
+    for it in selected_drive_items:
+        name = it.get("name") or "(file)"
+        link = it.get("webViewLink") or (f"https://drive.google.com/open?id={it.get('id')}" if it.get("id") else "")
+        if link:
+            materials.append(f"- {name}: {link}")
+        else:
+            materials.append(f"- {name}")
+    if materials:
+        lines.append("")
+        lines.append("Materials:")
+        lines.extend(materials)
+    return "\n".join(lines).strip()
+
+
+def _append_materials_bullets(existing_description: str, bullets: list[str]) -> str:
+    """
+    Append bullets under an existing 'Materials:' section if present.
+    Otherwise create a new Materials section at the end.
+    """
+    desc = (existing_description or "").rstrip()
+    new_lines = [f"- {b}" if not b.strip().startswith("-") else b for b in bullets if b.strip()]
+    if not new_lines:
+        return desc
+
+    marker = "\nMaterials:\n"
+    if marker in f"\n{desc}\n":
+        # Append at end (Materials section is already last in our formatting).
+        return (desc + "\n" + "\n".join(new_lines)).strip()
+
+    parts = [desc] if desc else []
+    parts.append("")
+    parts.append("Materials:")
+    parts.extend(new_lines)
+    return "\n".join(parts).strip()
+
 def _extract_booking_window(text: str, timezone: str) -> dict | None:
     regex_booking = _regex_extract_booking_window(text, timezone)
     if regex_booking:
@@ -295,6 +379,189 @@ If no clear time range exists, return can_book=false and empty strings.
 
 def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None:
     try:
+        materials = materials_sessions.get(thread_ts)
+        if materials:
+            phase = materials.get("phase")
+            lower = text.strip().lower()
+
+            if phase == "awaiting_materials":
+                urls = _extract_urls(text)
+                if lower in {"suggest", "drive", "files", "file"}:
+                    materials["pasted_links"] = []
+                    materials["drive_suggest_attempted"] = True
+                    q = _drive_query_from_task(materials.get("title") or "", materials.get("base_description") or "")
+                    organizer = materials.get("organizer_email")
+                    try:
+                        items = _drive_search(organizer, q)
+                    except Exception as e:
+                        print(f"Drive search error: {e}")
+                        items = []
+                    materials["drive_items"] = items[:5]
+                    if not materials["drive_items"]:
+                        materials["phase"] = "awaiting_materials"
+                        send_slack_message_with_fallback(
+                            channel,
+                            "I couldn’t find any relevant files in Drive. "
+                            "Do you want to paste link(s) to include under Materials? (paste links or reply `none`)",
+                            thread_ts=thread_ts,
+                        )
+                        return
+                    materials["phase"] = "awaiting_drive_selection"
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Here are a few Drive files that might be relevant:\n"
+                        f"{_render_drive_results(materials['drive_items'])}\n\n"
+                        "Reply with numbers to include (e.g. 1,3) or 'none'.",
+                        thread_ts=thread_ts,
+                    )
+                    return
+                if lower in {"no", "none", "nope", "nah"}:
+                    materials["pasted_links"] = []
+                    # If we already tried Drive suggestions and found nothing, finalize cleanly.
+                    if materials.get("drive_suggest_attempted"):
+                        materials["drive_items"] = []
+                        materials["phase"] = "finalize"
+                elif urls:
+                    materials["pasted_links"] = urls
+                else:
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Please paste link(s) to include under Materials, or reply 'none'.",
+                        thread_ts=thread_ts,
+                    )
+                    return
+
+                if materials.get("phase") != "finalize":
+                    materials["phase"] = "awaiting_drive_consent"
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Want me to suggest a few relevant files from your Drive for this meeting? (yes/no)",
+                        thread_ts=thread_ts,
+                    )
+                    return
+
+            if phase == "awaiting_drive_consent":
+                if lower in {"yes", "y", "yeah", "yep", "sure", "ok", "okay"}:
+                    q = _drive_query_from_task(materials.get("title") or "", materials.get("base_description") or "")
+                    organizer = materials.get("organizer_email")
+                    try:
+                        items = _drive_search(organizer, q)
+                    except Exception as e:
+                        print(f"Drive search error: {e}")
+                        items = []
+                    materials["drive_items"] = items[:5]
+                    if not materials["drive_items"]:
+                        materials["phase"] = "awaiting_materials"
+                        send_slack_message_with_fallback(
+                            channel,
+                            "I couldn’t find any relevant files in Drive. "
+                            "Do you want to paste link(s) to include under Materials? (paste links or reply `none`)",
+                            thread_ts=thread_ts,
+                        )
+                        return
+                    materials["phase"] = "awaiting_drive_selection"
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Here are a few Drive files that might be relevant:\n"
+                        f"{_render_drive_results(materials['drive_items'])}\n\n"
+                        "Reply with numbers to include (e.g. 1,3) or 'none'.",
+                        thread_ts=thread_ts,
+                    )
+                    return
+                if lower in {"no", "n", "nope", "nah"}:
+                    materials["drive_items"] = []
+                    materials["phase"] = "finalize"
+                else:
+                    send_slack_message_with_fallback(channel, "Please reply yes or no.", thread_ts=thread_ts)
+                    return
+
+            if phase in {"awaiting_drive_selection", "finalize"}:
+                selected = []
+                if phase == "awaiting_drive_selection":
+                    if lower in {"no", "none", "skip"}:
+                        selected = []
+                    else:
+                        nums = [int(n) for n in re.findall(r"\d+", text)]
+                        for n in nums:
+                            idx = n - 1
+                            if 0 <= idx < len(materials.get("drive_items") or []):
+                                selected.append(materials["drive_items"][idx])
+
+                full_desc = _build_materials_description(
+                    materials.get("base_description") or "",
+                    materials.get("pasted_links") or [],
+                    selected,
+                )
+
+                try:
+                    for email, ev_id in (materials.get("events") or {}).items():
+                        _calendar_update_description(email, ev_id, full_desc)
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Updated the calendar invite with Materials.",
+                        thread_ts=thread_ts,
+                    )
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Want to include more Materials in the invite?\n"
+                        "- Paste link(s), or reply `none`",
+                        thread_ts=thread_ts,
+                    )
+                    # Allow a final append-only link step.
+                    materials_sessions[thread_ts] = {
+                        **materials,
+                        "phase": "awaiting_more_materials",
+                        "base_description": full_desc,
+                        "drive_items": [],
+                        "drive_suggest_attempted": False,
+                    }
+                except Exception as e:
+                    print(f"Failed to update event description: {e}")
+                    send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
+                finally:
+                    # Only clear session if we didn't transition to awaiting_more_materials.
+                    if materials_sessions.get(thread_ts, {}).get("phase") != "awaiting_more_materials":
+                        materials_sessions.pop(thread_ts, None)
+                return
+
+            if phase == "awaiting_more_materials":
+                urls = _extract_urls(text)
+                lower = text.strip().lower()
+                if lower in {"no", "none", "nope", "nah"}:
+                    materials_sessions.pop(thread_ts, None)
+                    return
+                if not urls:
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Please paste link(s) to add, or reply `none`.",
+                        thread_ts=thread_ts,
+                    )
+                    return
+                updated_desc = _append_materials_bullets(
+                    materials.get("base_description") or "",
+                    urls,
+                )
+                try:
+                    for email, ev_id in (materials.get("events") or {}).items():
+                        _calendar_update_description(email, ev_id, updated_desc)
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Added those links to Materials.",
+                        thread_ts=thread_ts,
+                    )
+                except Exception as e:
+                    print(f"Failed to append materials links: {e}")
+                    send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
+                # Keep looping until user says none.
+                materials_sessions[thread_ts] = {**materials, "base_description": updated_desc, "phase": "awaiting_more_materials"}
+                send_slack_message_with_fallback(
+                    channel,
+                    "Want to include more Materials in the invite?\n"
+                    "- Paste link(s), or reply `none`",
+                    thread_ts=thread_ts,
+                )
+                return
+
         followup = meeting_followups.get(thread_ts)
         if followup:
             booking = _extract_booking_window(text, timezone)
@@ -314,6 +581,7 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                     )
                     return
                 created = []
+                events = {}
                 for email in followup["emails"]:
                     ev = _calendar_create(
                         profile_email=email,
@@ -324,6 +592,8 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                         timezone_name=timezone,
                     )
                     created.append({"email": email, "event": ev})
+                    if ev.get("id"):
+                        events[email] = ev["id"]
                 meeting_followups.pop(thread_ts, None)
                 send_slack_message_with_fallback(
                     channel,
@@ -332,6 +602,24 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                     f"Created on {len(created)} calendar(s).",
                     thread_ts=thread_ts,
                 )
+                organizer = followup["emails"][0] if followup.get("emails") else None
+                if organizer and events:
+                    materials_sessions[thread_ts] = {
+                        "phase": "awaiting_materials",
+                        "organizer_email": organizer,
+                        "events": events,  # email -> event_id
+                        "title": followup.get("title") or "",
+                        "base_description": followup.get("description") or "",
+                        "pasted_links": [],
+                        "drive_items": [],
+                    }
+                    send_slack_message_with_fallback(
+                        channel,
+                        "What links/files should I include under Materials in the invite?\n"
+                        "- Paste link(s), or reply `none`\n"
+                        "- Or reply `suggest` and I’ll suggest a few files from your Drive",
+                        thread_ts=thread_ts,
+                    )
                 return
             lower_text = text.lower()
             if any(k in lower_text for k in ["suggest", "available", "free", "slot", "time"]):
@@ -427,6 +715,7 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                                 )
                                 return
                             created = []
+                            events = {}
                             for email in emails:
                                 ev = _calendar_create(
                                     profile_email=email,
@@ -437,6 +726,8 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                                     timezone_name=timezone,
                                 )
                                 created.append({"email": email, "event": ev})
+                                if ev.get("id"):
+                                    events[email] = ev["id"]
                             send_slack_message_with_fallback(
                                 channel,
                                 "No conflicts found. "
@@ -446,6 +737,24 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
                             )
                             # Booking completed for this thread; clear followup mode.
                             meeting_followups.pop(thread_ts, None)
+                            organizer = emails[0] if emails else None
+                            if organizer and events:
+                                materials_sessions[thread_ts] = {
+                                    "phase": "awaiting_materials",
+                                    "organizer_email": organizer,
+                                    "events": events,
+                                    "title": task_data.get("title") or "",
+                                    "base_description": task_data.get("description") or "",
+                                    "pasted_links": [],
+                                    "drive_items": [],
+                                }
+                                send_slack_message_with_fallback(
+                                    channel,
+                                    "What links/files should I include under Materials in the invite?\n"
+                                    "- Paste link(s), or reply `none`\n"
+                                    "- Or reply `suggest` and I’ll suggest a few files from your Drive",
+                                    thread_ts=thread_ts,
+                                )
                             return
                         except Exception as e:
                             print(f"Error during direct booking: {e}")

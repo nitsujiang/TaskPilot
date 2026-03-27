@@ -266,14 +266,41 @@ def drive_search(request: Request, profile: str, query: str):
     creds = ensure_fresh(load_creds(profile))
     service = build("drive", "v3", credentials=creds)
 
+    query = (query or "").strip()
+    # Break into keywords and OR them for higher recall.
+    words = [w.lower() for w in query.replace("\n", " ").split(" ") if len(w.strip()) >= 3]
+    seen = []
+    for w in words:
+        w = w.strip(" ,.;:()[]{}\"")
+        if not w or w in seen:
+            continue
+        seen.append(w)
+        if len(seen) >= 6:
+            break
+    if not seen:
+        seen = [query[:40]] if query else ["meeting"]
+    clauses = []
+    for w in seen:
+        w_escaped = w.replace("'", "\\'")
+        clauses.append(f"fullText contains '{w_escaped}'")
+    q = " or ".join(clauses)
     results = service.files().list(
-        q=f"name contains '{query}'",
+        q=q,
         pageSize=10,
-        fields="files(id, name)",
+        fields="files(id, name, mimeType, webViewLink)",
     ).execute()
 
     items = results.get("files", [])
-    return [{"name": it["name"], "id": it["id"]} for it in items]
+    return [
+        {
+            "name": it.get("name"),
+            "id": it.get("id"),
+            "mimeType": it.get("mimeType"),
+            "webViewLink": it.get("webViewLink"),
+        }
+        for it in items
+        if it.get("id") and it.get("name")
+    ]
 
 @app.post("/calendar/create")
 def calendar_create(
@@ -304,6 +331,25 @@ def calendar_create(
         "start": ev.get("start", {}).get("dateTime"),
         "end": ev.get("end", {}).get("dateTime"),
     }
+
+
+@app.post("/calendar/update_description")
+def calendar_update_description(
+    request: Request,
+    profile: str,
+    event_id: str,
+    description: str,
+):
+    """Overwrite an event description for a connected profile."""
+    require_key(request)
+    creds = ensure_fresh(load_creds(profile))
+    service = build("calendar", "v3", credentials=creds)
+    ev = (
+        service.events()
+        .patch(calendarId="primary", eventId=event_id, body={"description": description or ""})
+        .execute()
+    )
+    return {"id": ev.get("id"), "htmlLink": ev.get("htmlLink")}
 
 
 @app.get("/profiles/check")
