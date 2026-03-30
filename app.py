@@ -1,11 +1,8 @@
 import secrets
 import requests
 
-from dotenv import load_dotenv
-# Load environment variables from .env file in entry point of application
-# DISCLAIMER: Must be done before the utils.slack and utils.gemini imports
-load_dotenv()
 from flask import Flask, request, jsonify
+from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
 from databases.db import save_task, init_db
 from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, get_user_timezone, BOT_USER_ID
@@ -25,8 +22,8 @@ from typing import Optional
 app = Flask(__name__)
 init_db()
 
-verifier = SignatureVerifier(os.getenv("SLACK_SIGNING_SECRET"))
-slack_client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
+slack_client = WebClient(token=SLACK_BOT_TOKEN)
 
 # --- Duplicate event prevention ---
 # For bigger scale, use a DB with a unique constraint on event_id.
@@ -140,10 +137,10 @@ def get_session(thread_ts: str) -> dict | None:
     return session
 
 def _backend_base() -> str:
-    return (os.getenv("API_ENDPOINT") or "").rstrip("/")
+    return (API_ENDPOINT or "").rstrip("/")
 
 def _backend_headers() -> dict:
-    return {"X-Backend-Key": os.getenv("BACKEND_API_KEY") or ""}
+    return {"X-Backend-Key": BACKEND_API_KEY or ""}
 
 def _connect_url(state_id: str) -> str:
     return f"{_backend_base()}/connect/google?state_id={state_id}"
@@ -843,6 +840,20 @@ def slack_events():
             ).start()
 
     return "", 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    status = {"status": "ok", "version": os.getenv("APP_VERSION", "1.0")}
+    try:
+        auth = slack_client.auth_test()
+        status["slack"] = {"ok": True, "user": auth.get("user")}
+    except Exception as e:
+        status["slack"] = {"ok": False, "error": str(e)}
+        status["status"] = "degraded"
+
+    code = 200 if status["status"] == "ok" else 503
+    return jsonify(status), code
 
 if __name__ == "__main__":
     # For auto reload, run: flask --app app run --port 3000 --reload

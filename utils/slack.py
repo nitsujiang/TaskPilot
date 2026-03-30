@@ -1,14 +1,12 @@
-# utils/slack.py
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-import os
 import time
+from config import SLACK_BOT_TOKEN
 
-slack_token = os.getenv("SLACK_BOT_TOKEN")
-if not slack_token:
+if not SLACK_BOT_TOKEN:
     raise ValueError("SLACK_BOT_TOKEN is not set")
 
-slack_client = WebClient(token=slack_token)
+slack_client = WebClient(token=SLACK_BOT_TOKEN)
 FALLBACK_MESSAGE = "Sorry, I had trouble processing that message. Please try again or contact your admin."
 
 # Fetch bot user ID at startup to identify and filter out self-mentions
