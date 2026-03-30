@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
-from config import BACKEND_INTERNAL_URL
+from config import API_ENDPOINT
 
 app = FastAPI(title="TaskPilot Frontend")
 
@@ -13,7 +13,8 @@ async def root():
 
 @app.get("/health", summary="Health Check", description="Checks if the backend bot process is reachable and healthy.")
 async def health():
-    backend_url = BACKEND_INTERNAL_URL
+    backend_base = API_ENDPOINT
+    backend_url = f"{backend_base}/health"
     headers = {}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:

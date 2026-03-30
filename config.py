@@ -16,7 +16,6 @@ BACKEND_API_KEY = os.getenv("BACKEND_API_KEY")
 STATE_SIGNING_SECRET = os.getenv("STATE_SIGNING_SECRET")
 
 # --- Notebook / LLM ---
-API_ENDPOINT = os.getenv("API_ENDPOINT", APP_EXTERNAL_URL)
 GOOGLE_API_KEY_AI = os.getenv("GOOGLE_API_KEY_AI")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PROFILE_EMAIL = os.getenv("PROFILE_EMAIL")
@@ -27,7 +26,9 @@ SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 SLACK_TEAM_ID = os.getenv("SLACK_TEAM_ID")
 
 # --- Frontend / proxy ---
-BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://127.0.0.1:3000/health")
+# Use API_ENDPOINT as the backend base URL. Frontend will append paths like /health.
+# If API_ENDPOINT is not set, default to localhost backend used during development.
+API_ENDPOINT = os.getenv("API_ENDPOINT", APP_EXTERNAL_URL)
 
 # --- Misc helpers ---
 def require_env(name: str) -> str:
