@@ -1,6 +1,5 @@
 import secrets
 import requests
-
 from flask import Flask, request, jsonify
 from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
@@ -655,6 +654,28 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
             save_task(task_data)
             print(f"Task saved: {json.dumps(task_data, indent=2)}")
             send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
+            if not task_data.get("missing_infos"):
+                sessions.pop(thread_ts, None)
+                save_task(task_data)
+                print(f"Task saved: {json.dumps(task_data, indent=2)}")
+                send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
+
+            # --- Send email notification ---
+            try:
+               import threading
+               recipients = task_data.get("owners_emails", [])
+               if recipients:
+                    threading.Thread(
+                        target=send_email,
+                        kwargs={
+                            "subject": f"Task Saved: {task_data.get('title', '(no title)')}",
+                            "body": f"Your task was saved successfully:\n\n{json.dumps(task_data, indent=2)}",
+                            "to": recipients
+                        }
+                    ).start()
+            except Exception as e:
+                print(f"Failed to send email: {e}")
+
 
             # Meeting flow: ask tagged owners to connect Google, then suggest common times.
             if task_data.get("task") == "meeting" and task_data.get("owners"):
