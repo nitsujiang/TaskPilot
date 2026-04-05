@@ -1,5 +1,9 @@
 # parser.py
-from agent.prompts import TASK_EXTRACTION_PROMPT, CLARIFYING_QUESTION_PROMPT
+from agent.prompts import (
+    TASK_EXTRACTION_PROMPT,
+    CLARIFYING_QUESTION_PROMPT,
+    NON_ACTIONABLE_RESPONSE_PROMPT,
+)
 from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, BOT_USER_ID, search_workspace_members
 from utils.gemini import call_gemini, TaskExtraction
 from utils.time import is_valid_deadline
@@ -7,6 +11,42 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 import json
 import re
+
+
+def _build_non_actionable_response(message: str) -> str:
+    """Return context-aware guidance for non-actionable messages.
+
+    Uses Gemini first for natural responses, with deterministic fallbacks when
+    the model is unavailable.
+    """
+    llm_prompt = NON_ACTIONABLE_RESPONSE_PROMPT.format(message=message)
+    llm_response = call_gemini(llm_prompt)
+    if isinstance(llm_response, str) and llm_response.strip():
+        return llm_response.strip()
+
+    normalized = re.sub(r"[^a-z0-9\s]", " ", (message or "").lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    if "my tasks" in normalized or "assigned" in normalized:
+        return "I can do that. Try: `show me my tasks` and I will list your assigned tasks."
+
+    if "meeting" in normalized or "schedule" in normalized:
+        return (
+            "I can help with that. Try: \"schedule a meeting with @person about <topic> by <date>, low urgency\" "
+            "or ask \"show me my tasks\"."
+        )
+
+    if "task" in normalized or "todo" in normalized or "remind" in normalized:
+        return (
+            "I can create and track tasks. Try: \"remind @person to <task> by <date>, high urgency\" "
+            "or ask \"show me my tasks\"."
+        )
+
+    return (
+        "I can help track tasks and schedule meetings. "
+        "Try: \"remind @john to fix the login bug by Friday, high urgency\" "
+        "or \"show me my tasks\"."
+    )
 
 def _recompute_missing_infos(task_data: dict) -> dict:
     """
@@ -172,7 +212,7 @@ def process_message(message: str, channel: str, timezone: str = "UTC", thread_ts
     if task_data.get("task") is None:
         send_slack_message_with_fallback(
             channel,
-            "Hey! I'm TaskPilot — I can help track tasks and schedule meetings. Try something like \"remind @john to fix the login bug by Friday, high urgency\"",
+            _build_non_actionable_response(message),
             thread_ts=thread_ts
         )
         return {}

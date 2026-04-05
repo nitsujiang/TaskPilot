@@ -377,8 +377,13 @@ If no clear time range exists, return can_book=false and empty strings.
 
 def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone: str) -> None:
     try:
-        lower_text = text.lower().strip()
-        if lower_text in {"my tasks", "show my tasks", "list my tasks", "what are my tasks"}:
+        normalized_text = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+        normalized_text = re.sub(r"\s+", " ", normalized_text).strip()
+        if (
+            "my tasks" in normalized_text
+            or "what are my tasks" in normalized_text
+            or "what am i assigned to" in normalized_text
+        ):
             tasks = get_tasks_for_owner(f"<@{user_id}>", limit=10)
             if not tasks:
                 send_slack_message_with_fallback(
