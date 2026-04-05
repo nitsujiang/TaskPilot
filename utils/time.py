@@ -1,4 +1,16 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+
+def zoneinfo_or_utc(tz_name: str | None) -> ZoneInfo:
+    """Resolve a Slack/IANA timezone name. On Windows, install `tzdata` for names like America/New_York."""
+    if not tz_name:
+        return ZoneInfo("UTC")
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("UTC")
+
 
 def is_valid_deadline(deadline_str: str) -> bool:
     """

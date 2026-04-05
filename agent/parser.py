@@ -6,8 +6,7 @@ from agent.prompts import (
 )
 from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, BOT_USER_ID, search_workspace_members
 from utils.gemini import call_gemini, TaskExtraction
-from utils.time import is_valid_deadline
-from zoneinfo import ZoneInfo
+from utils.time import is_valid_deadline, zoneinfo_or_utc
 from datetime import datetime
 import json
 import re
@@ -53,10 +52,13 @@ def _recompute_missing_infos(task_data: dict) -> dict:
     Recomputes missing_infos from scratch based on current field values.
     More reliable than trusting the model to track what's been filled in.
     """
-    task_data["missing_infos"] = [
-        field for field in ["task", "title", "description", "owners", "deadline", "urgency"]
-        if not task_data.get(field)
-    ]
+    required = ["task", "title", "description", "owners", "deadline", "urgency"]
+    # For meetings, deadline is optional
+    # app.py will book a user-provided slot if present
+    # otherwise, suggest common times after Google OAuth in oauth_and_suggest
+    if task_data.get("task") == "meeting":
+        required = [f for f in required if f != "deadline"]
+    task_data["missing_infos"] = [field for field in required if not task_data.get(field)]
     # Handle the temporary flag for owners, first check to avoid duplicates
     if "owners" not in task_data["missing_infos"] and task_data.get("_owners_need_clarification"):
         task_data["missing_infos"].append("owners")
@@ -125,7 +127,7 @@ def extract_task(message: str, timezone: str = "UTC") -> dict:
     """
     Takes a Slack message and extracts task details.
     """
-    now = datetime.now(tz=ZoneInfo(timezone)).replace(microsecond=0).isoformat()
+    now = datetime.now(tz=zoneinfo_or_utc(timezone)).replace(microsecond=0).isoformat()
     prompt = TASK_EXTRACTION_PROMPT.format(message=message, now=now, timezone=timezone)
 
     task_data = call_gemini(prompt, schema=TaskExtraction)
@@ -160,7 +162,7 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
     The distinction is that it handles a reply in an ongoing thread rather than a fresh message,
     so the prompt and merging logic are different.
     """
-    now = datetime.now(tz=ZoneInfo(timezone)).replace(microsecond=0).isoformat()
+    now = datetime.now(tz=zoneinfo_or_utc(timezone)).replace(microsecond=0).isoformat()
     prompt = TASK_EXTRACTION_PROMPT.format(message=reply, now=now, timezone=timezone)
 
     new_data = call_gemini(prompt, schema=TaskExtraction)

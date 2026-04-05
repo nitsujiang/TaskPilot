@@ -6,6 +6,7 @@ from agent.parser import process_message, process_clarification
 from databases.db import save_task, init_db, get_tasks_for_owner
 from utils.gmail_utils import send_email
 from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, get_user_timezone, BOT_USER_ID
+from utils.time import zoneinfo_or_utc
 from utils.gemini import call_gemini
 from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
@@ -15,7 +16,7 @@ import re
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, time as dtime
 from pydantic import BaseModel
 from typing import Optional
 
@@ -92,12 +93,77 @@ def _fixed_offset_for_timezone(timezone: str) -> str:
     return "-04:00" if timezone == "America/New_York" else "+00:00"
 
 
+def _parse_hour_minute(text_lower: str) -> tuple[int, int] | None:
+    """Parse '9am', '9:30pm', or '14:00' from lowercase text."""
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text_lower)
+    if m:
+        h, mn = int(m.group(1)), int(m.group(2) or 0)
+        ap = m.group(3)
+        if ap == "pm" and h != 12:
+            h += 12
+        if ap == "am" and h == 12:
+            h = 0
+        if not (0 <= h <= 23 and 0 <= mn <= 59):
+            return None
+        return (h, mn)
+    m = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", text_lower)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def _regex_weekday_and_time(text: str, timezone: str) -> dict | None:
+    """
+    Handles replies like 'Monday 9AM' or 'Tuesday 14:30' (no 'HH:MM-HH:MM' range).
+    Picks the next occurrence of that weekday in the user's timezone (must be strictly in the future).
+    """
+    day_map = {
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+    }
+    lower = text.lower()
+    target_weekday = None
+    for name, idx in day_map.items():
+        if re.search(r"\b" + re.escape(name) + r"\b", lower):
+            target_weekday = idx
+            break
+    if target_weekday is None:
+        return None
+    # Let the range-style regex handle "14:00-15:00"
+    if re.search(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", text):
+        return None
+    hm = _parse_hour_minute(lower)
+    if hm is None:
+        return None
+    h, minute = hm
+    tz = zoneinfo_or_utc(timezone)
+    now = datetime.now(tz)
+    today = now.date()
+    dow = today.weekday()
+    days_ahead = (target_weekday - dow) % 7
+    target_date = today + timedelta(days=days_ahead)
+    start_dt = datetime.combine(target_date, dtime(h, minute), tzinfo=tz)
+    if start_dt <= now:
+        start_dt += timedelta(days=7)
+    end_dt = start_dt + timedelta(hours=1)
+    return {
+        "can_book": True,
+        "start_iso": start_dt.isoformat(timespec="seconds"),
+        "end_iso": end_dt.isoformat(timespec="seconds"),
+    }
+
+
 def _regex_extract_booking_window(text: str, timezone: str) -> dict | None:
     # Example handled: "book Tuesday next week 14:00-15:00"
     m = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", text)
     if not m:
         return None
-    now = datetime.now()
+    now = datetime.now(zoneinfo_or_utc(timezone))
     # Choose the next Tuesday when user says "Tuesday next week"; otherwise next day with that weekday if present.
     day_map = {
         "monday": 0,
@@ -121,7 +187,7 @@ def _regex_extract_booking_window(text: str, timezone: str) -> dict | None:
         days_ahead = 7
     if "next week" in lower:
         days_ahead += 7
-    target_date = now.date().fromordinal(now.date().toordinal() + days_ahead)
+    target_date = now.date() + timedelta(days=days_ahead)
     sh, sm, eh, em = map(int, m.groups())
     offset = _fixed_offset_for_timezone(timezone)
     start_iso = f"{target_date.isoformat()}T{sh:02d}:{sm:02d}:00{offset}"
@@ -349,13 +415,49 @@ def _append_materials_bullets(existing_description: str, bullets: list[str]) -> 
     parts.extend(new_lines)
     return "\n".join(parts).strip()
 
+def _snap_booking_if_llm_past(booking: dict, timezone: str) -> dict:
+    """If Gemini used a past year, roll start/end forward until start is in the future."""
+    tz = zoneinfo_or_utc(timezone)
+    now = datetime.now(tz)
+    try:
+        start = _iso_to_dt(booking["start_iso"])
+        end = _iso_to_dt(booking["end_iso"])
+    except Exception:
+        return booking
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=tz)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=tz)
+    if start >= now - timedelta(minutes=1):
+        return booking
+    duration = end - start
+    if duration.total_seconds() <= 0:
+        duration = timedelta(hours=1)
+    for _ in range(6):
+        try:
+            start = start.replace(year=start.year + 1)
+        except ValueError:
+            start = start.replace(year=start.year + 1, month=2, day=28)
+        end = start + duration
+        if start >= now - timedelta(minutes=1):
+            break
+    booking["start_iso"] = start.isoformat(timespec="seconds")
+    booking["end_iso"] = end.isoformat(timespec="seconds")
+    return booking
+
+
 def _extract_booking_window(text: str, timezone: str) -> dict | None:
+    wd = _regex_weekday_and_time(text, timezone)
+    if wd:
+        return wd
     regex_booking = _regex_extract_booking_window(text, timezone)
     if regex_booking:
         return regex_booking
+    now = datetime.now(zoneinfo_or_utc(timezone)).replace(microsecond=0)
     prompt = f"""
 You are extracting a meeting time from user text.
 Timezone: {timezone}
+Current date and time in that timezone (use this year/month — do not use 2024 unless the user explicitly says 2024): {now.isoformat()}
 Text: {text}
 
 Return ONLY compact JSON with this schema:
@@ -364,6 +466,7 @@ Return ONLY compact JSON with this schema:
   "start_iso": "YYYY-MM-DDTHH:MM:SS±HH:MM",
   "end_iso": "YYYY-MM-DDTHH:MM:SS±HH:MM"
 }}
+start_iso and end_iso must be on or after {now.isoformat()}. If the user picks a weekday and time (e.g. Monday 9am), use the next occurrence of that weekday on or after today.
 If no clear time range exists, return can_book=false and empty strings.
 """
     data = call_gemini(prompt, schema=BookingWindow)
@@ -373,7 +476,7 @@ If no clear time range exists, return can_book=false and empty strings.
         return None
     if not data.get("start_iso") or not data.get("end_iso"):
         return None
-    return data
+    return _snap_booking_if_llm_past(data, timezone)
 
 def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone: str) -> None:
     try:
@@ -450,10 +553,10 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     return
                 if lower in {"no", "none", "nope", "nah"}:
                     materials["pasted_links"] = []
-                    # If we already tried Drive suggestions and found nothing, finalize cleanly.
-                    if materials.get("drive_suggest_attempted"):
-                        materials["drive_items"] = []
-                        materials["phase"] = "finalize"
+                    materials["drive_items"] = []
+                    # Skip optional Drive consent — user already declined materials.
+                    materials["phase"] = "finalize"
+                    materials["user_skipped_materials"] = True
                 elif urls:
                     materials["pasted_links"] = urls
                 else:
@@ -508,6 +611,8 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     send_slack_message_with_fallback(channel, "Please reply yes or no.", thread_ts=thread_ts)
                     return
 
+            phase = materials.get("phase")
+
             if phase in {"awaiting_drive_selection", "finalize"}:
                 selected = []
                 if phase == "awaiting_drive_selection":
@@ -534,20 +639,28 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         "Updated the calendar invite with Materials.",
                         thread_ts=thread_ts,
                     )
-                    send_slack_message_with_fallback(
-                        channel,
-                        "Want to include more Materials in the invite?\n"
-                        "- Paste link(s), or reply `none`",
-                        thread_ts=thread_ts,
-                    )
-                    # Allow a final append-only link step.
-                    materials_sessions[thread_ts] = {
-                        **materials,
-                        "phase": "awaiting_more_materials",
-                        "base_description": full_desc,
-                        "drive_items": [],
-                        "drive_suggest_attempted": False,
-                    }
+                    # First reply was `none` — no Drive step, no extra "more materials" loop.
+                    if materials.get("user_skipped_materials"):
+                        send_slack_message_with_fallback(
+                            channel,
+                            "No links added under Materials. You're all set.",
+                            thread_ts=thread_ts,
+                        )
+                        materials_sessions.pop(thread_ts, None)
+                    else:
+                        send_slack_message_with_fallback(
+                            channel,
+                            "Want to include more Materials in the invite?\n"
+                            "- Paste link(s), or reply `none`",
+                            thread_ts=thread_ts,
+                        )
+                        materials_sessions[thread_ts] = {
+                            **materials,
+                            "phase": "awaiting_more_materials",
+                            "base_description": full_desc,
+                            "drive_items": [],
+                            "drive_suggest_attempted": False,
+                        }
                 except Exception as e:
                     print(f"Failed to update event description: {e}")
                     send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)

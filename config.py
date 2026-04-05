@@ -1,8 +1,11 @@
 from dotenv import load_dotenv
 import os
 
-# Load .env once for the whole application
-load_dotenv()
+# Load env files from repo root, then agent-backend/.env for keys only present there.
+# (load_dotenv does not override existing vars by default.)
+_root = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_root, ".env"))
+load_dotenv(os.path.join(_root, "agent-backend", ".env"))
 
 
 # --- Misc helpers ---
