@@ -1,6 +1,5 @@
 import secrets
 import logging
-import os
 import json
 import hmac
 import base64
@@ -9,8 +8,6 @@ import html
 import urllib.request
 from datetime import datetime, timezone
 
-import psycopg2
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, PlainTextResponse, HTMLResponse
 
@@ -18,8 +15,14 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
-
-load_dotenv()
+from config import (
+    APP_EXTERNAL_URL,
+    BACKEND_API_KEY,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    STATE_SIGNING_SECRET,
+)
+from databases.db import conn, init_db
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -36,31 +39,6 @@ SCOPES = [
     "openid",
 ]
 
-def env(name: str) -> str:
-    v = os.environ.get(name)
-    if not v:
-        raise RuntimeError(f"Missing environment variable: {name}")
-    return v
-
-def conn():
-    return psycopg2.connect(env("DATABASE_URL"))
-
-def init_db():
-    c = conn()
-    try:
-        with c, c.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS profiles (
-                    profile TEXT PRIMARY KEY,
-                    creds_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                """
-            )
-    finally:
-        c.close()
-
 @app.on_event("startup")
 def startup():
     init_db()
@@ -68,16 +46,16 @@ def startup():
 def client_config():
     return {
         "web": {
-            "client_id": env("GOOGLE_CLIENT_ID"),
-            "client_secret": env("GOOGLE_CLIENT_SECRET"),
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [f"{env('APP_EXTERNAL_URL')}/auth/google/callback"],
+            "redirect_uris": [f"{APP_EXTERNAL_URL}/auth/google/callback"],
         }
     }
 
 def sign_state(payload: dict) -> str:
-    secret = env("STATE_SIGNING_SECRET").encode("utf-8")
+    secret = STATE_SIGNING_SECRET.encode("utf-8")
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = hmac.new(secret, raw, hashlib.sha256).digest()
     blob = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
@@ -85,7 +63,7 @@ def sign_state(payload: dict) -> str:
     return f"{blob}.{sigb}"
 
 def verify_state(state: str) -> dict:
-    secret = env("STATE_SIGNING_SECRET").encode("utf-8")
+    secret = STATE_SIGNING_SECRET.encode("utf-8")
     try:
         blob, sigb = state.split(".", 1)
         raw = base64.urlsafe_b64decode(blob + "==")
@@ -98,7 +76,7 @@ def verify_state(state: str) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 def require_key(request: Request):
-    if request.headers.get("X-Backend-Key") != env("BACKEND_API_KEY"):
+    if request.headers.get("X-Backend-Key") != BACKEND_API_KEY:
         raise HTTPException(status_code=401, detail="Missing or invalid X-Backend-Key.")
 
 def load_creds(profile: str) -> Credentials:
@@ -146,8 +124,7 @@ def connect_google(profile: str = "", state_id: str = ""):
     elif not profile:
         raise HTTPException(status_code=400, detail="Provide profile=YOUR_EMAIL or state_id=... for OAuth-first flow.")
 
-    base_url = env("APP_EXTERNAL_URL")
-    redirect_uri = f"{base_url}/auth/google/callback"
+    redirect_uri = f"{APP_EXTERNAL_URL}/auth/google/callback"
 
     flow = Flow.from_client_config(
         client_config(),

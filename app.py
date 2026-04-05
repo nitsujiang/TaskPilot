@@ -25,6 +25,7 @@ verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
 slack_client = WebClient(token=SLACK_BOT_TOKEN)
 
 # --- Duplicate event prevention ---
+# Used for in memory deduplication of Slack events to prevent double-processing on retries.
 # For bigger scale, use a DB with a unique constraint on event_id.
 # 1. Resets on restart — Slack may retry unprocessed events causing duplicates
 # 2. Not thread safe — multiple threads could pass the duplicate check simultaneously
@@ -651,14 +652,11 @@ def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None
         else:
             # Complete — save and clear session
             sessions.pop(thread_ts, None)
+            task_data["channel"] = channel
+            task_data["thread_ts"] = thread_ts
             save_task(task_data)
             print(f"Task saved: {json.dumps(task_data, indent=2)}")
             send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
-            if not task_data.get("missing_infos"):
-                sessions.pop(thread_ts, None)
-                save_task(task_data)
-                print(f"Task saved: {json.dumps(task_data, indent=2)}")
-                send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
 
             # --- Send email notification ---
             try:
