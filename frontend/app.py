@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
-from config import API_ENDPOINT
+from frontend.config import API_ENDPOINT
 
 app = FastAPI(title="TaskPilot Frontend")
 
