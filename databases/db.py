@@ -139,6 +139,55 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
     return out
 
 
+def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
+    """Return tasks assigned to a given Slack user mention."""
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    task_type,
+                    title,
+                    description,
+                    owners_json,
+                    channel,
+                    thread_ts,
+                    deadline,
+                    status,
+                    urgency,
+                    created_at
+                FROM tasks
+                WHERE owners_json @> %s::jsonb
+                ORDER BY deadline NULLS LAST, created_at DESC
+                LIMIT %s
+                """,
+                (Json([owner_mention]), int(limit)),
+            )
+            rows = cursor.fetchall()
+
+    out = []
+    for row in rows:
+        owners = row.get("owners_json") or []
+        out.append(
+            {
+                "id": row["id"],
+                "task": row.get("task_type"),
+                "title": row.get("title"),
+                "description": row.get("description"),
+                "owners": owners,
+                "channel": row.get("channel"),
+                "thread_ts": row.get("thread_ts"),
+                "deadline": row.get("deadline").isoformat() if row.get("deadline") else None,
+                "status": row.get("status"),
+                "urgency": row.get("urgency"),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+            }
+        )
+
+    return out
+
+
 def run_agent(task_data):
     if not task_data:
         return "ignore"

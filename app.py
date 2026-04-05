@@ -3,7 +3,8 @@ import requests
 from flask import Flask, request, jsonify
 from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
-from databases.db import save_task, init_db
+from databases.db import save_task, init_db, get_tasks_for_owner
+from utils.gmail_utils import send_email
 from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, get_user_timezone, BOT_USER_ID
 from utils.gemini import call_gemini
 from slack_sdk import WebClient
@@ -374,8 +375,38 @@ If no clear time range exists, return can_book=false and empty strings.
         return None
     return data
 
-def handle_event(text: str, channel: str, thread_ts: str, timezone: str) -> None:
+def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone: str) -> None:
     try:
+        lower_text = text.lower().strip()
+        if lower_text in {"my tasks", "show my tasks", "list my tasks", "what are my tasks"}:
+            tasks = get_tasks_for_owner(f"<@{user_id}>", limit=10)
+            if not tasks:
+                send_slack_message_with_fallback(
+                    channel,
+                    "I couldn't find any tasks assigned to you yet.",
+                    thread_ts=thread_ts,
+                )
+                return
+
+            lines = [f"Here are your tasks ({min(len(tasks), 5)} of {len(tasks)}):"]
+            for index, task in enumerate(tasks[:5], start=1):
+                title = task.get("title") or "(no title)"
+                deadline_text = task.get("deadline")
+                deadline = "no deadline"
+                if deadline_text:
+                    try:
+                        deadline = datetime.fromisoformat(deadline_text).strftime("%b %d, %Y %I:%M %p")
+                    except Exception:
+                        deadline = deadline_text
+                status = task.get("status") or "pending"
+                urgency = task.get("urgency") or "n/a"
+                lines.append(f"{index}. {title} | due: {deadline} | status: {status} | urgency: {urgency}")
+            if len(tasks) > 5:
+                lines.append(f"...and {len(tasks) - 5} more.")
+
+            send_slack_message_with_fallback(channel, "\n".join(lines), thread_ts=thread_ts)
+            return
+
         materials = materials_sessions.get(thread_ts)
         if materials:
             phase = materials.get("phase")
@@ -855,7 +886,7 @@ def slack_events():
             # per https://docs.slack.dev/interactivity/handling-user-interaction/#acknowledgment_response
             threading.Thread(
                 target=handle_event,
-                args=(cleaned_text, channel, thread_ts, timezone)
+                args=(cleaned_text, user_id, channel, thread_ts, timezone)
             ).start()
 
     return "", 200
