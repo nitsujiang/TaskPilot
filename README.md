@@ -111,7 +111,7 @@ https://<ngrok-id>.ngrok-free.app/slack/events
 Email reminders are enabled in code, but Gmail desktop OAuth must be prepared on the runtime machine:
 
 - `utils/gmail_utils.py` expects:
-  - `client_secrets_desktop.json` present locally
+  - `client_secrets_desktop.json` present locally.
   - generated `gmail_token.json` after first interactive auth.
 - Scheduler runs hourly and sends reminder emails for tasks due within 24 hours to resolved owner emails.
 
