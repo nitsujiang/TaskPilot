@@ -7,13 +7,13 @@ class MetricsCollector:
     
     def log_event(self,event_type,info):
         """
-        recording what has happenen
+        Record an event payload.
         """
         pass 
 
     def save_to_file(self):
         """
-        write logs to a json file
+        Write logs to a JSON file.
         """
 
 

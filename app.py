@@ -992,7 +992,7 @@ def slack_events():
 
         if event.get("type") == "app_mention":
             event_id = data.get("event_id")
-            # Just ack the request and do processing in background to avoid timeouts
+            # Acknowledge the request immediately, then process in the background to avoid timeouts.
             if is_duplicate(event_id):
                 return "", 200
 

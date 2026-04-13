@@ -175,7 +175,8 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
 
     # Owners — append new owners rather than replace
     if new_data.get("owners"):
-        existing_owners = task_data.get("owners") or [] # In case its None from the original extraction, treat as empty list for merging
+        # If owners was previously None, treat it as an empty list for merging.
+        existing_owners = task_data.get("owners") or []
         # merge without duplicates
         task_data["owners"] = list(dict.fromkeys(existing_owners + new_data["owners"]))
 
