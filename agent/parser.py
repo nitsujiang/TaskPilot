@@ -52,12 +52,8 @@ def _recompute_missing_infos(task_data: dict) -> dict:
     Recomputes missing_infos from scratch based on current field values.
     More reliable than trusting the model to track what's been filled in.
     """
+    # Meetings must include a requested time window; todos must include due date.
     required = ["task", "title", "description", "owners", "deadline", "urgency"]
-    # For meetings, deadline is optional
-    # app.py will book a user-provided slot if present
-    # otherwise, suggest common times after Google OAuth in oauth_and_suggest
-    if task_data.get("task") == "meeting":
-        required = [f for f in required if f != "deadline"]
     task_data["missing_infos"] = [field for field in required if not task_data.get(field)]
     # Handle the temporary flag for owners, first check to avoid duplicates
     if "owners" not in task_data["missing_infos"] and task_data.get("_owners_need_clarification"):

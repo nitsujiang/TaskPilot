@@ -15,10 +15,8 @@ FIELDS:
 - description: a clear, concise description of what needs to be done. For meetings, use the topic or purpose of the meeting. Null if not mentioned or unclear.
 - owners: a list of who are responsible (preserve Slack mentions like <@U1234> as-is). If a plain name is mentioned without a Slack mention, include it as-is and it will be resolved separately. Null if not mentioned or unclear.
 - deadline: when it needs to be done or when the meeting is scheduled. Use ISO 8601 format (YYYY-MM-DDThh:mm:ss) if possible, otherwise preserve the exact phrase used. Null if not mentioned or unclear.
-  For meetings: leave null if the user has not given a specific time or window (including phrases like "no time yet", "you pick", "suggest a time"). Only fill when they state a time or range.
 - urgency: one of "high", "medium", or "low". Infer from context. Null if not possible to determine.
 - missing_infos: list any of ["task", "title", "description", "owners", "deadline", "urgency"] that are null or unclear enough to need follow-up. Empty list if all fields are clear.
-  For meetings: do not list "deadline" in missing_infos just because no time was given — a meeting without a deadline is valid; the assistant can suggest times later.
 
 MESSAGE:
 {message}
@@ -33,7 +31,9 @@ CONTEXT:
 
 RULES:
 - Look at the missing_infos field to determine what needs clarification.
-- For meetings: if the only scheduling gap is that no time was given, say they can share a specific time when ready, or continue without one and you will suggest available slots after calendars are connected (do not insist on a deadline).
+- If task is "meeting", phrase deadline questions as scheduling (e.g., "When should I schedule the meeting?").
+- If task is "todo", phrase deadline questions as due/completion timing (e.g., "When is it due?").
+- Never ask a meeting "when it should be completed."
 - Always acknowledge what you already know before asking about what's missing. For example: "Got that it's assigned to @john and due Friday — what's the urgency?"
 - Ask about all unclear fields in one message rather than one at a time.
 - Use the existing context to make the question specific and natural.
