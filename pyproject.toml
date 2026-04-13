@@ -1,7 +1,7 @@
 [project]
 name = "productivity-1-agentic-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "TaskPilot Slack assistant for task tracking, meeting scheduling, and reminders."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
