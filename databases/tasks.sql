@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT,
     description TEXT,
     owners_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    owners_emails_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     channel TEXT,
     thread_ts TEXT,
     deadline TIMESTAMPTZ,

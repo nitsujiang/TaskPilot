@@ -43,6 +43,15 @@ def init_db():
     """
     _init_from_sql_file("tasks.sql")
     _init_from_sql_file("profiles.sql")
+    # Backward-compatible migration for existing databases created before owners_emails_json.
+    with _conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS owners_emails_json JSONB NOT NULL DEFAULT '[]'::jsonb
+                """
+            )
 
 def save_task(task_data: dict):
     """
@@ -60,6 +69,7 @@ def save_task(task_data: dict):
     - deadline should be an ISO-8601 string; invalid/missing values are stored as NULL.
     """
     owners = task_data.get("owners") or []
+    owners_emails = task_data.get("owners_emails") or []
 
     deadline_dt = _parse_deadline(task_data.get("deadline"))
 
@@ -68,14 +78,15 @@ def save_task(task_data: dict):
             cursor.execute(
                 """
                 INSERT INTO tasks (
-                    task_type, title, description, owners_json, channel, thread_ts, deadline, status, urgency, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    task_type, title, description, owners_json, owners_emails_json, channel, thread_ts, deadline, status, urgency, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     task_data.get("task"),
                     task_data.get("title"),
                     task_data.get("description"),
                     Json(owners),
+                    Json(owners_emails),
                     task_data.get("channel"),
                     task_data.get("thread_ts"),
                     deadline_dt,
@@ -100,6 +111,7 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
                     title,
                     description,
                     owners_json,
+                    owners_emails_json,
                     channel,
                     thread_ts,
                     deadline,
@@ -120,6 +132,7 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
     out = []
     for row in rows:
         owners = row.get("owners_json") or []
+        owners_emails = row.get("owners_emails_json") or []
         out.append(
             {
                 "id": row["id"],
@@ -127,6 +140,7 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
                 "title": row.get("title"),
                 "description": row.get("description"),
                 "owners": owners,
+                "owners_emails": owners_emails,
                 "channel": row.get("channel"),
                 "thread_ts": row.get("thread_ts"),
                 "deadline": row.get("deadline").isoformat() if row.get("deadline") else None,
@@ -151,6 +165,7 @@ def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
                     title,
                     description,
                     owners_json,
+                    owners_emails_json,
                     channel,
                     thread_ts,
                     deadline,
@@ -169,6 +184,7 @@ def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
     out = []
     for row in rows:
         owners = row.get("owners_json") or []
+        owners_emails = row.get("owners_emails_json") or []
         out.append(
             {
                 "id": row["id"],
@@ -176,6 +192,7 @@ def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
                 "title": row.get("title"),
                 "description": row.get("description"),
                 "owners": owners,
+                "owners_emails": owners_emails,
                 "channel": row.get("channel"),
                 "thread_ts": row.get("thread_ts"),
                 "deadline": row.get("deadline").isoformat() if row.get("deadline") else None,

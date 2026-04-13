@@ -3,9 +3,17 @@ import requests
 from flask import Flask, request, jsonify
 from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
+import databases.db as db_module
 from databases.db import save_task, init_db, get_tasks_for_owner
+from agent.scheduler import start_scheduler
 from utils.gmail_utils import send_email
-from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, get_user_timezone, BOT_USER_ID
+from utils.slack import (
+    send_slack_message_with_fallback,
+    FALLBACK_MESSAGE,
+    get_user_timezone,
+    BOT_USER_ID,
+    resolve_owner_mentions_to_emails,
+)
 from utils.time import zoneinfo_or_utc
 from utils.gemini import call_gemini
 from slack_sdk import WebClient
@@ -22,6 +30,23 @@ from typing import Optional
 
 app = Flask(__name__)
 init_db()
+
+_scheduler = None
+
+
+def _should_start_scheduler() -> bool:
+    # Flask dev reloader imports the module twice; start only in the reloader child.
+    if os.environ.get("FLASK_RUN_FROM_CLI") == "true":
+        return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    return True
+
+
+if _should_start_scheduler():
+    try:
+        _scheduler = start_scheduler(db_module)
+        print("Reminder scheduler started.")
+    except Exception as e:
+        print(f"Failed to start reminder scheduler: {e}")
 
 verifier = SignatureVerifier(SLACK_SIGNING_SECRET)
 slack_client = WebClient(token=SLACK_BOT_TOKEN)
@@ -803,6 +828,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             sessions.pop(thread_ts, None)
             task_data["channel"] = channel
             task_data["thread_ts"] = thread_ts
+            task_data["owners_emails"] = resolve_owner_mentions_to_emails(task_data.get("owners") or [])
             save_task(task_data)
             print(f"Task saved: {json.dumps(task_data, indent=2)}")
             send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)

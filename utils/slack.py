@@ -1,6 +1,7 @@
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import time
+import re
 from config import SLACK_BOT_TOKEN
 
 if not SLACK_BOT_TOKEN:
@@ -20,6 +21,33 @@ def get_user_timezone(user_id: str) -> str:
     except SlackApiError as e:
         print(f"Failed to fetch timezone for {user_id}: {e.response['error']}")
         return "UTC"
+
+
+def get_user_email(user_id: str) -> str | None:
+    """Return a Slack user's profile email if available."""
+    try:
+        user_info = slack_client.users_info(user=user_id)
+        email = (user_info.get("user", {}).get("profile", {}).get("email") or "").strip()
+        return email or None
+    except SlackApiError as e:
+        print(f"Failed to fetch email for {user_id}: {e.response['error']}")
+        return None
+
+
+def resolve_owner_mentions_to_emails(owners: list[str]) -> list[str]:
+    """
+    Convert owners like <@U123ABC> to workspace emails via users.info.
+    Returns unique emails in input order.
+    """
+    out = []
+    for owner in owners or []:
+        m = re.match(r"<@([UW][A-Z0-9]+)>", owner or "")
+        if not m:
+            continue
+        email = get_user_email(m.group(1))
+        if email and email not in out:
+            out.append(email)
+    return out
 
 _members_cache = None
 _members_cache_time = 0

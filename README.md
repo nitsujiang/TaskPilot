@@ -1,75 +1,125 @@
 # TaskPilot
 
-An AI-powered Slack bot that helps teams track tasks and deadlines by extracting structured task data from natural language messages.
+TaskPilot is a Slack agent that extracts tasks/meetings from natural language, stores them in PostgreSQL, supports Google Calendar/Drive meeting workflows, and provides a Streamlit overview dashboard.
 
-## Features
-- Extracts task details (title, description, owners, deadline, urgency) from Slack messages
-- Clarification loop — asks follow-up questions for missing or ambiguous fields
-- Automatically resolves plain name mentions to Slack user IDs via workspace search
-- Timezone-aware deadline parsing
-- Session management per thread with 60 second inactivity timeout
+## Current Capabilities
 
-## Project Structure
-```
-agent/
-    parser.py       — core agent logic, extraction and clarification loop
-    prompts.py      — Gemini prompt templates
-utils/
-    gemini.py       — Gemini API client and extraction schema
-    slack.py        — Slack client, messaging helpers, workspace member search
-    time.py         — deadline validation
-databases/
-    db.py           — database connection and task persistence
-app.py              — Flask server, Slack event listener, session management
-```
+- Extract task or meeting fields (`task`, `title`, `description`, `owners`, `deadline`, `urgency`) from Slack messages.
+- Clarification loop for missing fields.
+- Meeting flow:
+  - book a user-provided time
+  - or suggest common availability after Google OAuth connection.
+- Conflict checking before meeting booking.
+- Materials flow to append links/Drive files to event descriptions.
+- Google backend service for OAuth + Calendar + Drive APIs.
+- Reminder pipeline:
+  - hourly scheduler checks upcoming tasks
+  - Slack reminders
+  - email reminders (requires Gmail API desktop credentials/token setup).
+- Streamlit board for DB overview (this week, open tasks, reminder readiness).
 
-## Setup
+## Architecture
 
-### Prerequisites
+- `app.py`  
+  Flask Slack event handler, orchestration flow, meeting booking/materials, scheduler startup.
+- `services/google_api.py`  
+  FastAPI service for Google OAuth, Calendar, and Drive endpoints.
+- `agent/parser.py`, `agent/prompts.py`  
+  Gemini extraction + clarification behavior.
+- `agent/scheduler.py`  
+  Hourly reminder scheduler (Slack + email).
+- `utils/slack.py`, `utils/gmail_utils.py`, `utils/gemini.py`, `utils/time.py`  
+  Integrations and shared helpers.
+- `databases/db.py`, `databases/tasks.sql`, `databases/profiles.sql`  
+  PostgreSQL persistence.
+- `frontend/streamlit_app.py`  
+  Streamlit dashboard over DB state.
+
+## Prerequisites
+
 - Python 3.12+
-- A Slack app with the following bot token scopes:
-  - `app_mentions:read`
-  - `chat:write`
-  - `users:read`
-- A Gemini API key
+- PostgreSQL database
+- Slack app and bot token (at least `app_mentions:read`, `chat:write`, `users:read`)
+- Gemini API key
+- Google OAuth client credentials for Calendar/Drive backend
+- ngrok for local Slack event tunneling
 
-### Installation
+## Environment
+
+Use root `.env` (and optionally `agent-backend/.env`) with values such as:
+
+```env
+DATABASE_URL=...
+GEMINI_API_KEY=...
+SLACK_BOT_TOKEN=...
+SLACK_SIGNING_SECRET=...
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+BACKEND_API_KEY=...
+STATE_SIGNING_SECRET=...
+APP_EXTERNAL_URL=http://localhost:8000
+API_ENDPOINT=http://localhost:8000
+```
+
+## Install
+
 ```bash
-uv sync
+pip install -r <your requirements export>  # optional style
+pip install apscheduler streamlit tzdata
 ```
 
-### Environment Variables
-Create a `.env` file in the root directory:
-```
-GEMINI_API_KEY=your_gemini_api_key
-SLACK_BOT_TOKEN=xoxb-your-bot-token
-SLACK_SIGNING_SECRET=your-signing-secret
-```
+Or your existing project sync workflow (`uv sync` / lock-based flow).
 
-### Running Locally
+## Local Run (All Services)
+
+Open separate terminals.
+
+1) Flask bot:
+
 ```bash
-# Start the Flask server
 flask --app app run --port 3000 --reload
+```
 
-# In a separate terminal, expose the server to the internet
+2) FastAPI Google backend:
+
+```bash
+uvicorn services.google_api:app --host 127.0.0.1 --port 8000
+```
+
+3) ngrok tunnel to Flask:
+
+```bash
 ngrok http 3000
 ```
 
-Set the ngrok URL as your Slack app's event subscription URL:
+If `ngrok` is not in PATH, run by full executable path.
+
+4) Streamlit overview board:
+
+```bash
+streamlit run frontend/streamlit_app.py
 ```
+
+Set Slack Event Subscriptions URL to:
+
+```text
 https://<ngrok-id>.ngrok-free.app/slack/events
 ```
 
-## Usage
-Invite the bot to a channel and tag it with a task:
-```
-@TaskPilot remind @john to fix the login bug by Friday, high urgency
-```
+## Email Reminder Setup Notes
 
-The bot will extract the task details and ask clarifying questions if anything is missing. All replies must tag the bot:
-```
-@TaskPilot next Friday
-@TaskPilot high urgency
-```
+Email reminders are enabled in code, but Gmail desktop OAuth must be prepared on the runtime machine:
 
-Sessions should expire after 60 seconds of inactivity. If a session times out, start a new thread.
+- `utils/gmail_utils.py` expects:
+  - `client_secrets_desktop.json` present locally
+  - generated `gmail_token.json` after first interactive auth.
+- Scheduler runs hourly and sends reminder emails for tasks due within 24 hours to resolved owner emails.
+
+## Quick Test Flow
+
+1) Mention bot in Slack with a task/meeting message.
+2) Confirm task saved message and DB insert.
+3) For meetings, connect Google via link and ask for suggestions.
+4) Book a suggested time and verify event creation.
+5) Open Streamlit board to confirm task visibility.
+6) Create a near-term task and verify reminder behavior in Flask logs/inbox.
