@@ -39,7 +39,7 @@ def _init_from_sql_file(filename: str):
 def init_db():
     """
     Create both the task and OAuth profile schemas if they do not exist.
-    THis is idempotent and can be called at app startup to ensure the database is ready.
+    This is idempotent and can be called at app startup to ensure the database is ready.
     """
     _init_from_sql_file("tasks.sql")
     _init_from_sql_file("profiles.sql")
