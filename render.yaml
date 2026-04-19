@@ -1,0 +1,75 @@
+databases:
+  - name: taskpilot-db
+    databaseName: taskpilot
+    user: taskpilot
+    plan: free
+
+services:
+  # ── Flask Slack bot ("backend") ──────────────────────────────────────
+  - name: task-pilot-api
+    type: web
+    runtime: python
+    buildCommand: pip install -e .
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: taskpilot-db
+          property: connectionString
+      - key: SLACK_BOT_TOKEN
+        sync: false
+      - key: SLACK_SIGNING_SECRET
+        sync: false
+      - key: SLACK_TEAM_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: BACKEND_API_KEY
+        sync: false
+      - key: STATE_SIGNING_SECRET
+        sync: false
+      - key: APP_EXTERNAL_URL
+        value: https://task-pilot-api.onrender.com
+      - key: API_ENDPOINT
+        value: https://task-pilot-api.onrender.com
+
+  # ── FastAPI Google backend ─────────────────────────────────────────────────
+  - name: taskpilot-google-api
+    type: web
+    runtime: python
+    buildCommand: pip install -e .
+    startCommand: uvicorn services.google_api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: taskpilot-db
+          property: connectionString
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: APP_EXTERNAL_URL
+        value: https://task-pilot-api.onrender.com
+      - key: BACKEND_API_KEY
+        sync: false
+      - key: STATE_SIGNING_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+  # ── Streamlit dashboard ("frontend") ─────────────────────────────────
+  - name: taskpilot-api
+    type: web
+    runtime: python
+    buildCommand: pip install -e .
+    startCommand: streamlit run frontend/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: taskpilot-db
+          property: connectionString
