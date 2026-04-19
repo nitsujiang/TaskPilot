@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
 import databases.db as db_module
-from databases.db import save_task, init_db, get_tasks_for_owner
+from databases.db import save_task, init_db, get_tasks_for_owner, get_all_tasks, mark_all_tasks_complete, clear_all_tasks
 from agent.scheduler import start_scheduler
 from utils.gmail_utils import send_email
 from utils.slack import (
@@ -538,6 +538,84 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                 lines.append(f"...and {len(tasks) - 5} more.")
 
             send_slack_message_with_fallback(channel, "\n".join(lines), thread_ts=thread_ts)
+            return
+
+        if (
+            "task log" in normalized_text
+            or "overview" in normalized_text
+            or "all tasks" in normalized_text
+            or "show tasks" in normalized_text
+        ):
+            all_tasks = get_all_tasks()
+            if not all_tasks:
+                send_slack_message_with_fallback(
+                    channel,
+                    "No tasks found in the database.",
+                    thread_ts=thread_ts,
+                )
+                return
+
+            pending = [t for t in all_tasks if (t.get("status") or "pending") != "completed"]
+            completed = [t for t in all_tasks if (t.get("status") or "pending") == "completed"]
+            todos = [t for t in all_tasks if t.get("task") == "todo"]
+            meetings = [t for t in all_tasks if t.get("task") == "meeting"]
+
+            lines = [
+                f"*Task Overview* — {len(all_tasks)} total | {len(pending)} open | {len(completed)} completed | {len(todos)} todos | {len(meetings)} meetings",
+                "",
+            ]
+
+            if pending:
+                lines.append("*Open Tasks:*")
+                for index, task in enumerate(pending[:15], start=1):
+                    title = task.get("title") or "(no title)"
+                    task_type = task.get("task") or "?"
+                    deadline_text = task.get("deadline")
+                    deadline = "no deadline"
+                    if deadline_text:
+                        try:
+                            deadline = datetime.fromisoformat(deadline_text).strftime("%b %d %I:%M %p")
+                        except Exception:
+                            deadline = deadline_text
+                    urgency = task.get("urgency") or "n/a"
+                    owners = ", ".join(task.get("owners") or []) or "unassigned"
+                    lines.append(f"{index}. [{task_type}] {title} | due: {deadline} | urgency: {urgency} | owners: {owners}")
+                if len(pending) > 15:
+                    lines.append(f"...and {len(pending) - 15} more open tasks.")
+
+            if completed:
+                lines.append(f"\n_{len(completed)} completed task(s) not shown. Say \"clear tasks\" to wipe or \"mark all complete\" to close everything._")
+
+            send_slack_message_with_fallback(channel, "\n".join(lines), thread_ts=thread_ts)
+            return
+
+        if (
+            "clear tasks" in normalized_text
+            or "wipe tasks" in normalized_text
+            or "delete all tasks" in normalized_text
+            or "clear the db" in normalized_text
+            or "wipe the db" in normalized_text
+        ):
+            count = clear_all_tasks()
+            send_slack_message_with_fallback(
+                channel,
+                f"Done. Permanently deleted {count} task(s) from the database.",
+                thread_ts=thread_ts,
+            )
+            return
+
+        if (
+            "mark all complete" in normalized_text
+            or "mark all tasks complete" in normalized_text
+            or "complete all tasks" in normalized_text
+            or "close all tasks" in normalized_text
+        ):
+            count = mark_all_tasks_complete()
+            send_slack_message_with_fallback(
+                channel,
+                f"Done. Marked {count} task(s) as completed.",
+                thread_ts=thread_ts,
+            )
             return
 
         materials = materials_sessions.get(thread_ts)

@@ -205,6 +205,74 @@ def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
     return out
 
 
+def get_all_tasks(status_filter: str | None = None) -> list:
+    """
+    Return all tasks, optionally filtered by status.
+    Pass status_filter='pending' to get only open tasks, or None for all.
+    """
+    with _conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            if status_filter:
+                cursor.execute(
+                    """
+                    SELECT id, task_type, title, description, owners_json, owners_emails_json,
+                           channel, thread_ts, deadline, status, urgency, created_at
+                    FROM tasks
+                    WHERE COALESCE(status, 'pending') = %s
+                    ORDER BY deadline NULLS LAST, created_at DESC
+                    """,
+                    (status_filter,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, task_type, title, description, owners_json, owners_emails_json,
+                           channel, thread_ts, deadline, status, urgency, created_at
+                    FROM tasks
+                    ORDER BY deadline NULLS LAST, created_at DESC
+                    """
+                )
+            rows = cursor.fetchall()
+
+    out = []
+    for row in rows:
+        out.append(
+            {
+                "id": row["id"],
+                "task": row.get("task_type"),
+                "title": row.get("title"),
+                "description": row.get("description"),
+                "owners": row.get("owners_json") or [],
+                "owners_emails": row.get("owners_emails_json") or [],
+                "channel": row.get("channel"),
+                "thread_ts": row.get("thread_ts"),
+                "deadline": row.get("deadline").isoformat() if row.get("deadline") else None,
+                "status": row.get("status"),
+                "urgency": row.get("urgency"),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+            }
+        )
+    return out
+
+
+def mark_all_tasks_complete() -> int:
+    """Mark all non-completed tasks as completed. Returns count of rows updated."""
+    with _conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE tasks SET status = 'completed' WHERE COALESCE(status, 'pending') != 'completed'"
+            )
+            return cursor.rowcount
+
+
+def clear_all_tasks() -> int:
+    """Permanently delete all tasks. Returns count of rows deleted."""
+    with _conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM tasks")
+            return cursor.rowcount
+
+
 def run_agent(task_data):
     if not task_data:
         return "ignore"

@@ -51,11 +51,7 @@ def resolve_owner_mentions_to_emails(owners: list[str]) -> list[str]:
 
 _members_cache = None
 _members_cache_time = 0
-<<<<<<< HEAD
-MEMBERS_CACHE_TTL = 300  # 5 minutes; would be stale if members are added/removed but reduces API calls for large workspaces
-=======
 MEMBERS_CACHE_TTL = 300  # 5 minutes; may become stale if members change, but reduces API calls for large workspaces.
->>>>>>> 3f22290 (Clean up comment phrasing/typos and make wording consistent without changing runtime behavior.)
 
 def search_workspace_members(query: str) -> list:
     """
