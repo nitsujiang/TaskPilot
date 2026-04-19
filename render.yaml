@@ -9,8 +9,8 @@ services:
   - name: task-pilot-api
     type: web
     runtime: python
-    buildCommand: pip install -e .
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    buildCommand: uv sync
+    startCommand: uv run gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
@@ -42,8 +42,8 @@ services:
   - name: taskpilot-google-api
     type: web
     runtime: python
-    buildCommand: pip install -e .
-    startCommand: uvicorn services.google_api:app --host 0.0.0.0 --port $PORT
+    buildCommand: uv sync
+    startCommand: uv run uvicorn services.google_api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -66,8 +66,8 @@ services:
   - name: taskpilot-api
     type: web
     runtime: python
-    buildCommand: pip install -e .
-    startCommand: streamlit run frontend/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    buildCommand: uv sync
+    startCommand: uv run streamlit run frontend/streamlit_app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: DATABASE_URL
         fromDatabase:
