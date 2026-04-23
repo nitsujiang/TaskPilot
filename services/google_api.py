@@ -7,6 +7,7 @@ import hashlib
 import html
 import urllib.request
 from datetime import datetime, timezone
+from email.mime.text import MIMEText
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, PlainTextResponse, HTMLResponse
@@ -35,6 +36,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/userinfo.email",
     "openid",
 ]
@@ -327,6 +329,32 @@ def calendar_update_description(
         .execute()
     )
     return {"id": ev.get("id"), "htmlLink": ev.get("htmlLink")}
+
+
+@app.post("/gmail/send")
+def gmail_send(
+    request: Request,
+    profile: str,
+    to: str,
+    subject: str = "",
+    body: str = "",
+):
+    """Send an email using Gmail API for a connected profile."""
+    require_key(request)
+    if not profile.strip():
+        raise HTTPException(status_code=400, detail="profile is required.")
+    if not to.strip():
+        raise HTTPException(status_code=400, detail="to is required.")
+
+    creds = ensure_fresh(load_creds(profile))
+    service = build("gmail", "v1", credentials=creds)
+
+    msg = MIMEText(body or "")
+    msg["to"] = to.strip()
+    msg["subject"] = (subject or "").strip()
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return {"id": result.get("id")}
 
 
 @app.get("/profiles/check")

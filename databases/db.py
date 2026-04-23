@@ -52,6 +52,30 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS owners_emails_json JSONB NOT NULL DEFAULT '[]'::jsonb
                 """
             )
+            cursor.execute(
+                """
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS send_initial_email BOOLEAN NOT NULL DEFAULT TRUE
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS initial_email_sent_at TIMESTAMPTZ
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS last_email_reminder_at TIMESTAMPTZ
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE tasks
+                ADD COLUMN IF NOT EXISTS last_email_reminder_by_recipient JSONB NOT NULL DEFAULT '{}'::jsonb
+                """
+            )
 
 def save_task(task_data: dict):
     """
@@ -78,8 +102,9 @@ def save_task(task_data: dict):
             cursor.execute(
                 """
                 INSERT INTO tasks (
-                    task_type, title, description, owners_json, owners_emails_json, channel, thread_ts, deadline, status, urgency, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    task_type, title, description, owners_json, owners_emails_json, channel, thread_ts, deadline, status, urgency, send_initial_email, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     task_data.get("task"),
@@ -92,9 +117,12 @@ def save_task(task_data: dict):
                     deadline_dt,
                     task_data.get("status") or "pending",
                     task_data.get("urgency"),
+                    bool(task_data.get("send_initial_email", True)),
                     datetime.now(timezone.utc),
                 ),
             )
+            row = cursor.fetchone()
+            return row[0] if row else None
 
 
 def get_upcoming_tasks(within_hours: int = 24) -> list:
@@ -117,6 +145,10 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
                     deadline,
                     status,
                     urgency,
+                    send_initial_email,
+                    initial_email_sent_at,
+                    last_email_reminder_at,
+                    last_email_reminder_by_recipient,
                     created_at
                 FROM tasks
                 WHERE deadline IS NOT NULL
@@ -147,6 +179,10 @@ def get_upcoming_tasks(within_hours: int = 24) -> list:
                 "status": row.get("status"),
                 "urgency": row.get("urgency"),
                 "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "send_initial_email": row.get("send_initial_email", True),
+                "initial_email_sent_at": row.get("initial_email_sent_at").isoformat() if row.get("initial_email_sent_at") else None,
+                "last_email_reminder_at": row.get("last_email_reminder_at").isoformat() if row.get("last_email_reminder_at") else None,
+                "last_email_reminder_by_recipient": row.get("last_email_reminder_by_recipient") or {},
             }
         )
 
@@ -199,6 +235,10 @@ def get_tasks_for_owner(owner_mention: str, limit: int = 10) -> list:
                 "status": row.get("status"),
                 "urgency": row.get("urgency"),
                 "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "send_initial_email": row.get("send_initial_email", True),
+                "initial_email_sent_at": row.get("initial_email_sent_at").isoformat() if row.get("initial_email_sent_at") else None,
+                "last_email_reminder_at": row.get("last_email_reminder_at").isoformat() if row.get("last_email_reminder_at") else None,
+                "last_email_reminder_by_recipient": row.get("last_email_reminder_by_recipient") or {},
             }
         )
 
@@ -250,9 +290,38 @@ def get_all_tasks(status_filter: str | None = None) -> list:
                 "status": row.get("status"),
                 "urgency": row.get("urgency"),
                 "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "send_initial_email": row.get("send_initial_email", True),
+                "initial_email_sent_at": row.get("initial_email_sent_at").isoformat() if row.get("initial_email_sent_at") else None,
+                "last_email_reminder_at": row.get("last_email_reminder_at").isoformat() if row.get("last_email_reminder_at") else None,
+                "last_email_reminder_by_recipient": row.get("last_email_reminder_by_recipient") or {},
             }
         )
     return out
+
+
+def mark_initial_email_sent(task_id: int) -> None:
+    with _conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE tasks SET initial_email_sent_at = NOW() WHERE id = %s",
+                (int(task_id),),
+            )
+
+
+def mark_email_reminder_sent(task_id: int, recipient: str) -> None:
+    with _conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE tasks
+                SET
+                    last_email_reminder_at = NOW(),
+                    last_email_reminder_by_recipient = COALESCE(last_email_reminder_by_recipient, '{}'::jsonb)
+                        || jsonb_build_object(%s, NOW()::text)
+                WHERE id = %s
+                """,
+                (recipient, int(task_id)),
+            )
 
 
 def mark_all_tasks_complete() -> int:

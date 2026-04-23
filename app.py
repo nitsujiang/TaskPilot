@@ -4,7 +4,15 @@ from flask import Flask, request, jsonify
 from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
 from agent.parser import process_message, process_clarification
 import databases.db as db_module
-from databases.db import save_task, init_db, get_tasks_for_owner, get_all_tasks, mark_all_tasks_complete, clear_all_tasks
+from databases.db import (
+    save_task,
+    init_db,
+    get_tasks_for_owner,
+    get_all_tasks,
+    mark_all_tasks_complete,
+    clear_all_tasks,
+    mark_initial_email_sent,
+)
 from agent.scheduler import start_scheduler
 from utils.gmail_utils import send_email
 from utils.slack import (
@@ -111,6 +119,35 @@ def _extract_urls(text: str) -> list[str]:
         cleaned.append(u.rstrip(").,;!?>\"'"))
     # de-dupe preserving order
     return list(dict.fromkeys(cleaned))
+
+
+def _extract_initial_email_pref(text: str) -> bool | None:
+    t = (text or "").lower()
+    opt_out_markers = [
+        "no initial email",
+        "don't send initial email",
+        "dont send initial email",
+        "no email",
+        "skip email",
+        "without email",
+    ]
+    opt_in_markers = [
+        "send email",
+        "yes email",
+        "with email",
+    ]
+    if any(m in t for m in opt_out_markers):
+        return False
+    if any(m in t for m in opt_in_markers):
+        return True
+    return None
+
+
+def _send_initial_email_and_mark(task_id: int | None, recipients: list[str], subject: str, body: str) -> None:
+    """Send initial email and mark DB only after successful send."""
+    send_email(to=recipients, subject=subject, body=body)
+    if task_id:
+        mark_initial_email_sent(task_id)
 
 
 def _fixed_offset_for_timezone(timezone: str) -> str:
@@ -349,7 +386,82 @@ def _find_conflicts(emails: list[str], start_iso: str, end_iso: str) -> list[dic
                 )
     return conflicts
 
-def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str], timezone: str) -> None:
+def _extract_suggested_slots(raw: str, timezone: str) -> list[dict]:
+    tz = zoneinfo_or_utc(timezone)
+    now = datetime.now(tz)
+    window_end = now + timedelta(days=7)
+    slots = []
+    seen = set()
+    pattern = re.compile(
+        r"(?:(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
+        r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})",
+        re.IGNORECASE,
+    )
+    for m in pattern.finditer(raw or ""):
+        date_text = m.group(2)
+        sh, sm = int(m.group(3)), int(m.group(4))
+        eh, em = int(m.group(5)), int(m.group(6))
+        try:
+            y, mo, d = [int(x) for x in date_text.split("-")]
+            start = datetime(y, mo, d, sh, sm, tzinfo=tz)
+            end = datetime(y, mo, d, eh, em, tzinfo=tz)
+            if end <= start:
+                end = start + timedelta(hours=1)
+        except Exception:
+            continue
+        # Enforce the same policy we asked for: next 7 days, Mon-Fri, 09:00-17:00.
+        if start < now or start > window_end:
+            continue
+        if start.weekday() >= 5:  # 5=Sat, 6=Sun
+            continue
+        if start.hour < 9 or (end.hour > 17 or (end.hour == 17 and end.minute > 0)):
+            continue
+        key = (start.isoformat(), end.isoformat())
+        if key in seen:
+            continue
+        seen.add(key)
+        slots.append(
+            {
+                "start_iso": start.isoformat(timespec="seconds"),
+                "end_iso": end.isoformat(timespec="seconds"),
+                "weekday": start.strftime("%A").lower(),
+                "label": f"{start.strftime('%A, %Y-%m-%d %H:%M')}-{end.strftime('%H:%M')} ({timezone})",
+            }
+        )
+        if len(slots) >= 5:
+            break
+    return slots
+
+
+def _format_slot_options(slots: list[dict], timezone: str) -> str:
+    if not slots:
+        return "I couldn't format time suggestions right now. Please share a specific date/time."
+    lines = ["Common meeting time suggestions:"]
+    for i, s in enumerate(slots, start=1):
+        lines.append(f"{i}. {s['label']}")
+    lines.append("")
+    lines.append("Reply with `pick 1` ... `pick 5` (or just `1`-`5`).")
+    return "\n".join(lines)
+
+
+def _booking_from_suggested_choice(text: str, slots: list[dict]) -> dict | None:
+    if not slots:
+        return None
+    lower = (text or "").lower()
+    nums = [int(n) for n in re.findall(r"\b([1-9]\d*)\b", lower)]
+    if nums:
+        idx = nums[0] - 1
+        if 0 <= idx < min(len(slots), 5):
+            return {"can_book": True, "start_iso": slots[idx]["start_iso"], "end_iso": slots[idx]["end_iso"]}
+    for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
+        if day in lower:
+            for s in slots:
+                if s.get("weekday") == day:
+                    return {"can_book": True, "start_iso": s["start_iso"], "end_iso": s["end_iso"]}
+    return None
+
+
+def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str], timezone: str) -> list[dict]:
     events_by_email = {email: _calendar_list(email) for email in emails}
     prompt = f"""
     You are a scheduling assistant.
@@ -359,8 +471,9 @@ def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str
     Timezone: {timezone}
     Busy events per attendee:
     {json.dumps(events_by_email, indent=2)}
-    Return 5 suggested meeting times formatted as:
-    - Weekday, YYYY-MM-DD HH:MM-HH:MM ({timezone})
+    Return only 5 lines in this exact format:
+    Weekday, YYYY-MM-DD HH:MM-HH:MM ({timezone})
+    Do not include explanations, availability dumps, or extra text.
     """
     suggestions = call_gemini(prompt)
     if not suggestions:
@@ -370,12 +483,21 @@ def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str
             "Please wait a bit and try again, or use a key/project with available quota.",
             thread_ts=thread_ts,
         )
-        return
+        return []
+    slots = _extract_suggested_slots(suggestions, timezone)
+    if not slots:
+        send_slack_message_with_fallback(
+            channel,
+            "I couldn't parse suggested slots cleanly. Please share a specific date/time (e.g. Friday 2pm).",
+            thread_ts=thread_ts,
+        )
+        return []
     send_slack_message_with_fallback(
         channel,
-        f"Common meeting time suggestions:\n{suggestions}",
+        _format_slot_options(slots, timezone),
         thread_ts=thread_ts,
     )
+    return slots
 
 
 def _drive_query_from_task(title: str, description: str) -> str:
@@ -814,6 +936,8 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
         followup = meeting_followups.get(thread_ts)
         if followup:
             booking = _extract_booking_window(text, timezone)
+            if not booking:
+                booking = _booking_from_suggested_choice(text, followup.get("suggested_slots") or [])
             if booking:
                 conflicts = _find_conflicts(
                     followup["emails"],
@@ -825,7 +949,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         channel,
                         "That time conflicts with existing events:\n"
                         f"{_format_conflicts(conflicts)}\n\n"
-                        "Pick another time, or ask me to suggest common slots.",
+                        "Pick 1-5 from the suggested options, or ask me to suggest again.",
                         thread_ts=thread_ts,
                     )
                     return
@@ -872,12 +996,15 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                 return
             lower_text = text.lower()
             if any(k in lower_text for k in ["suggest", "available", "free", "slot", "time"]):
-                _send_common_time_suggestions(channel, thread_ts, followup["emails"], timezone)
+                slots = _send_common_time_suggestions(channel, thread_ts, followup["emails"], timezone)
+                if slots:
+                    followup["suggested_slots"] = slots
+                    meeting_followups[thread_ts] = followup
                 return
             send_slack_message_with_fallback(
                 channel,
-                "I can check a specific meeting window for conflicts, or suggest common free slots. "
-                "Tell me the time you want, or ask for common availability.",
+                "Please choose a suggested slot by replying `pick 1` to `pick 5` (or just `1`-`5`). "
+                "If you need a fresh list, say `suggest`.",
                 thread_ts=thread_ts,
             )
             return
@@ -886,6 +1013,9 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
         if session:
             # Continuation — merge reply into existing session
             task_data = process_clarification(text, session["task_data"], channel, timezone, thread_ts)
+            pref = _extract_initial_email_pref(text)
+            if pref is not None:
+                task_data["send_initial_email"] = pref
         else:
             # Fresh extraction
             task_data = process_message(text, channel, timezone, thread_ts)
@@ -893,6 +1023,9 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             if not task_data: # process_message already sent the fallback
                 sessions.pop(thread_ts, None)
                 return
+            pref = _extract_initial_email_pref(text)
+            if pref is not None:
+                task_data["send_initial_email"] = pref
 
         if task_data.get("missing_infos"):
             # Still needs clarification, keep session alive and update last_active
@@ -907,7 +1040,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             task_data["channel"] = channel
             task_data["thread_ts"] = thread_ts
             task_data["owners_emails"] = resolve_owner_mentions_to_emails(task_data.get("owners") or [])
-            save_task(task_data)
+            task_id = save_task(task_data)
             print(f"Task saved: {json.dumps(task_data, indent=2)}")
             send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
 
@@ -915,15 +1048,22 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             try:
                import threading
                recipients = task_data.get("owners_emails", [])
-               if recipients:
+               if recipients and task_data.get("send_initial_email", True):
                     threading.Thread(
-                        target=send_email,
+                        target=_send_initial_email_and_mark,
                         kwargs={
+                            "task_id": task_id,
+                            "recipients": recipients,
                             "subject": f"Task Saved: {task_data.get('title', '(no title)')}",
                             "body": f"Your task was saved successfully:\n\n{json.dumps(task_data, indent=2)}",
-                            "to": recipients
                         }
                     ).start()
+               elif not task_data.get("send_initial_email", True):
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Skipping initial email notification for this item (as requested).",
+                        thread_ts=thread_ts,
+                    )
             except Exception as e:
                 print(f"Failed to send email: {e}")
 
@@ -964,6 +1104,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         "emails": emails,
                         "title": task_data.get("title") or "Meeting",
                         "description": task_data.get("description") or "",
+                        "suggested_slots": [],
                     }
 
                     # If user already gave a concrete slot, perform direct conflict-check + booking.
@@ -1030,11 +1171,11 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                             send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
                             return
 
-                    try:
-                        _send_common_time_suggestions(channel, thread_ts, emails, timezone)
-                    except Exception as e:
-                        print(f"Error calling Gemini: {e}")
-                        send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
+                    send_slack_message_with_fallback(
+                        channel,
+                        "Got it. Do you have a specific time in mind, or should I suggest common free slots?",
+                        thread_ts=thread_ts,
+                    )
                     return
                 threading.Thread(target=oauth_and_suggest, daemon=True).start()
 

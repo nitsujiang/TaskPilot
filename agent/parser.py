@@ -52,8 +52,11 @@ def _recompute_missing_infos(task_data: dict) -> dict:
     Recomputes missing_infos from scratch based on current field values.
     More reliable than trusting the model to track what's been filled in.
     """
-    # Meetings must include a requested time window; todos must include due date.
-    required = ["task", "title", "description", "owners", "deadline", "urgency"]
+    required = ["task", "title", "description", "owners", "urgency"]
+    # Todos require an explicit due time. Meetings can proceed without it
+    # because we can suggest common slots in a follow-up step.
+    if task_data.get("task") == "todo":
+        required.append("deadline")
     task_data["missing_infos"] = [field for field in required if not task_data.get(field)]
     # Handle the temporary flag for owners, first check to avoid duplicates
     if "owners" not in task_data["missing_infos"] and task_data.get("_owners_need_clarification"):
@@ -144,6 +147,38 @@ def needs_clarification(task_data: dict) -> bool:
     return len(task_data.get("missing_infos", [])) > 0
 
 def generate_clarifying_question(task_data: dict) -> str:
+    missing = set(task_data.get("missing_infos") or [])
+    task_type = task_data.get("task")
+
+    def _join(parts: list[str]) -> str:
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        if len(parts) == 2:
+            return f"{parts[0]} and {parts[1]}"
+        return f"{', '.join(parts[:-1])}, and {parts[-1]}"
+
+    # Deterministic ordering: ask for core fields first.
+    if task_type in {"meeting", "todo"}:
+        core_fields = ["title", "description", "urgency", "owners"]
+        core_missing = [f for f in core_fields if f in missing]
+        if core_missing:
+            labels = {
+                "title": "title",
+                "description": "description",
+                "urgency": "urgency (high/medium/low)",
+                "owners": "owner(s)",
+            }
+            asks = [labels[f] for f in core_missing]
+            return f"Got it. Could you share the {_join(asks)}?"
+
+        if task_type == "meeting" and "deadline" in missing:
+            return "Do you already have a time in mind, or should I suggest common available times?"
+
+        if task_type == "todo" and "deadline" in missing:
+            return "Got it. When is this due?"
+
     prompt = CLARIFYING_QUESTION_PROMPT.format(
         task_data=json.dumps(task_data, indent=2)
     )
