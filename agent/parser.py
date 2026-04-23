@@ -4,12 +4,51 @@ from agent.prompts import (
     CLARIFYING_QUESTION_PROMPT,
     NON_ACTIONABLE_RESPONSE_PROMPT,
 )
-from utils.slack import send_slack_message_with_fallback, FALLBACK_MESSAGE, BOT_USER_ID, search_workspace_members
-from utils.gemini import call_gemini, TaskExtraction
+from utils.slack import send_slack_message_with_fallback, BOT_USER_ID, search_workspace_members
+from utils.gemini import call_gemini, TaskExtraction, take_last_gemini_user_hint
 from utils.time import is_valid_deadline, zoneinfo_or_utc
 from datetime import datetime
 import json
 import re
+
+# Shown when the model is down, quota is hit, or extraction returns nothing — not a generic "admin" error.
+REPEAT_UNCLEAR_EXTRACT = (
+    "I didn't catch that. Could you repeat the request in a full sentence, "
+    "for example: book a meeting with @someone, title \"...\", description \"...\", and high/medium/low urgency?"
+)
+REPEAT_UNCLEAR_CLARIFY = (
+    "I didn't quite get that. Could you repeat? For example, reply *high*, *medium*, or *low* for urgency, "
+    "or rephrase what you need."
+)
+
+
+def _prefix_optional_api_hint(prefix: str | None, body: str) -> str:
+    if prefix and body:
+        return f"{prefix}\n\n{body}"
+    return body or prefix or ""
+
+
+def _normalize_urgency_guess(text: str) -> str | None:
+    """
+    Map typos and shorthand (e.g. 'hig', 'med') to high/medium/low when the LLM is unavailable.
+    """
+    raw = re.sub(r"[^a-z0-9\s]", " ", (text or "").lower())
+    raw = re.sub(r"\s+", " ", raw).strip()
+    if not raw:
+        return None
+    # Single word or first token
+    first = raw.split()[0] if raw.split() else raw
+    if first in {
+        "high", "higher", "hi", "h", "hig", "hih", "hgh", "hgih", "hgi", "urgent",
+    }:
+        return "high"
+    if first in {
+        "medium", "med", "mid", "m", "me", "meh", "medi", "meidum", "meduim", "normal",
+    }:
+        return "medium"
+    if first in {"low", "lo", "l", "lowe", "lazy"}:
+        return "low"
+    return None
 
 
 def _build_non_actionable_response(message: str) -> str:
@@ -23,29 +62,36 @@ def _build_non_actionable_response(message: str) -> str:
     if isinstance(llm_response, str) and llm_response.strip():
         return llm_response.strip()
 
+    api_hint = take_last_gemini_user_hint()
+
     normalized = re.sub(r"[^a-z0-9\s]", " ", (message or "").lower())
     normalized = re.sub(r"\s+", " ", normalized).strip()
 
     if "my tasks" in normalized or "assigned" in normalized:
-        return "I can do that. Try: `show me my tasks` and I will list your assigned tasks."
+        return _prefix_optional_api_hint(
+            api_hint, "I can do that. Try: `show me my tasks` and I will list your assigned tasks."
+        )
 
     if "meeting" in normalized or "schedule" in normalized:
-        return (
+        return _prefix_optional_api_hint(
+            api_hint,
             "I can help with that. Try: \"schedule a meeting with @person about <topic> by <date>, low urgency\" "
-            "or ask \"show me my tasks\"."
+            "or ask \"show me my tasks\".",
         )
 
     if "task" in normalized or "todo" in normalized or "remind" in normalized:
-        return (
+        return _prefix_optional_api_hint(
+            api_hint,
             "I can create and track tasks. Try: \"remind @person to <task> by <date>, high urgency\" "
-            "or ask \"show me my tasks\"."
+            "or ask \"show me my tasks\".",
         )
 
-    return (
+    base = (
         "I can help track tasks and schedule meetings. "
         "Try: \"remind @john to fix the login bug by Friday, high urgency\" "
         "or \"show me my tasks\"."
     )
+    return _prefix_optional_api_hint(api_hint, base)
 
 def _recompute_missing_infos(task_data: dict) -> dict:
     """
@@ -185,7 +231,12 @@ def generate_clarifying_question(task_data: dict) -> str:
     question = call_gemini(prompt)
     # Clean up internal suggestion flags after question is generated
     task_data.pop("_owners_suggestions", None)
-    return question
+    if isinstance(question, str) and question.strip():
+        return question.strip()
+    llm_hint = take_last_gemini_user_hint()
+    if llm_hint:
+        return llm_hint
+    return REPEAT_UNCLEAR_CLARIFY
 
 def process_clarification(reply: str, task_data: dict, channel: str, timezone: str = "UTC", thread_ts: str = None) -> dict:
     """
@@ -198,6 +249,15 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
 
     new_data = call_gemini(prompt, schema=TaskExtraction)
     if not new_data:
+        # Model unavailable or unparseable — try local urgency match for short replies.
+        g = _normalize_urgency_guess(reply)
+        if g and "urgency" in (task_data.get("missing_infos") or []):
+            task_data["urgency"] = g
+        task_data = _validate_owners(task_data)
+        task_data = _recompute_missing_infos(task_data)
+        if needs_clarification(task_data):
+            q = generate_clarifying_question(task_data)
+            send_slack_message_with_fallback(channel, q, thread_ts=thread_ts)
         return task_data
 
     # Merge — overwrite fields found in reply.
@@ -224,7 +284,7 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
 
     if needs_clarification(task_data):
         question = generate_clarifying_question(task_data)
-        send_slack_message_with_fallback(channel, question or FALLBACK_MESSAGE, thread_ts=thread_ts)
+        send_slack_message_with_fallback(channel, question, thread_ts=thread_ts)
 
     return task_data
 
@@ -237,7 +297,25 @@ def process_message(message: str, channel: str, timezone: str = "UTC", thread_ts
     task_data = extract_task(message, timezone)
     if not task_data:
         print("Failed to extract data from message, skipping.")
-        send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
+        api_hint = take_last_gemini_user_hint()
+        g = _normalize_urgency_guess(message)
+        if g:
+            # Likely urgency shorthand/typo — not an API "crash"; omit quota wording.
+            send_slack_message_with_fallback(
+                channel,
+                f"I only got *{g}* — could you resend the full meeting or task in one message "
+                f"(with @attendees, title, description, and {g} urgency)?",
+                thread_ts=thread_ts,
+            )
+        else:
+            # One message only: if the model/API failed, the hint already explains it (try again, check quota).
+            # Stacking a second “repeat your request” block reads as duplicate / conflicting bot replies.
+            body = api_hint or REPEAT_UNCLEAR_EXTRACT
+            send_slack_message_with_fallback(
+                channel,
+                body,
+                thread_ts=thread_ts,
+            )
         return {}
 
     print(f"Extracted: {json.dumps(task_data, indent=2)}\n")
@@ -253,7 +331,7 @@ def process_message(message: str, channel: str, timezone: str = "UTC", thread_ts
 
     if needs_clarification(task_data):
         question = generate_clarifying_question(task_data)
-        send_slack_message_with_fallback(channel, question or FALLBACK_MESSAGE, thread_ts=thread_ts)
+        send_slack_message_with_fallback(channel, question, thread_ts=thread_ts)
     else:
         print("All details present -- ready to save to database and send reminders")
 

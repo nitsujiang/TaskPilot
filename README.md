@@ -13,9 +13,9 @@ TaskPilot is a Slack agent that extracts tasks/meetings from natural language, s
 - Materials flow to append links/Drive files to event descriptions.
 - Google backend service for OAuth + Calendar + Drive APIs.
 - Reminder pipeline:
-  - hourly scheduler checks upcoming tasks
-  - Slack reminders
-  - email reminders (requires Gmail API desktop credentials/token setup).
+  - hourly scheduler checks tasks due within the next 14 days
+  - Slack reminders to assignees
+  - email reminders via backend Gmail (`/gmail/send`) using Google-connected profiles (not desktop `client_secrets` flow)
 - Streamlit board for DB overview (this week, open tasks, reminder readiness).
 
 ## Architecture
@@ -108,12 +108,9 @@ https://<ngrok-id>.ngrok-free.app/slack/events
 
 ## Email Reminder Setup Notes
 
-Email reminders are enabled in code, but Gmail desktop OAuth must be prepared on the runtime machine:
-
-- `utils/gmail_utils.py` expects:
-  - `client_secrets_desktop.json` present locally.
-  - generated `gmail_token.json` after first interactive auth.
-- Scheduler runs hourly and sends reminder emails for tasks due within 24 hours to resolved owner emails.
+- Initial “task saved” and recurring reminder emails go through **`utils/gmail_utils.send_email`**, which calls the FastAPI backend **`POST /gmail/send`** with `X-Backend-Key`.
+- The sender profile must have completed **`/connect/google`** (same OAuth as Calendar/Drive, including Gmail send scope).
+- Reminder cadence is urgency-aware; the scheduler runs hourly and considers deadlines in the **next 14 days**, with per-recipient spacing stored in Postgres (`last_email_reminder_by_recipient`).
 
 ## Quick Test Flow
 

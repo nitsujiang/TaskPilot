@@ -23,7 +23,7 @@ from utils.slack import (
     resolve_owner_mentions_to_emails,
 )
 from utils.time import zoneinfo_or_utc
-from utils.gemini import call_gemini
+from utils.gemini import call_gemini, take_last_gemini_user_hint
 from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
 from collections import OrderedDict, defaultdict
@@ -96,11 +96,10 @@ def is_rate_limited(user_id: str) -> bool:
 # --- Session management ---
 # - Keyed by thread_ts since app_mention replies stay in the same thread.
 # - In-memory — sessions are lost on restart, which is acceptable since abandoned tasks are never saved.
-# - Sessions expire after 60 seconds of inactivity. Expired sessions cannot be resumed
-#   -> user must start a new thread to discourage overly long threads.
+# - Sessions expire after 15 minutes of inactivity (so follow-ups are not lost between messages).
 sessions = {}
 MAX_SESSIONS = 500
-SESSION_TIMEOUT = 60
+SESSION_TIMEOUT = 15 * 60
 meeting_followups = {}
 materials_sessions = {}
 
@@ -477,10 +476,14 @@ def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str
     """
     suggestions = call_gemini(prompt)
     if not suggestions:
+        hint = take_last_gemini_user_hint()
         send_slack_message_with_fallback(
             channel,
-            "I couldn't generate suggestions right now because the Gemini API quota is exhausted. "
-            "Please wait a bit and try again, or use a key/project with available quota.",
+            hint
+            or (
+                "I couldn't generate time suggestions just now. "
+                "Please try again in a few minutes, or say a specific day/time to book."
+            ),
             thread_ts=thread_ts,
         )
         return []
