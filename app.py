@@ -68,6 +68,7 @@ slack_client = WebClient(token=SLACK_BOT_TOKEN)
 processed_events = OrderedDict()
 MAX_EVENTS = 1000
 
+
 def is_duplicate(event_id: str) -> bool:
     if event_id in processed_events:
         return True
@@ -76,11 +77,13 @@ def is_duplicate(event_id: str) -> bool:
         processed_events.popitem(last=False)
     return False
 
+
 # --- Rate limiting ---
 # Same caveats as processed_events — in-memory, resets on restart, not thread safe.
 user_request_times = defaultdict(list)
 MAX_REQUESTS = 5
 WINDOW_SECONDS = 60
+
 
 def is_rate_limited(user_id: str) -> bool:
     now = time.time()
@@ -92,6 +95,7 @@ def is_rate_limited(user_id: str) -> bool:
         return True
     user_request_times[user_id].append(now)
     return False
+
 
 # --- Session management ---
 # - Keyed by thread_ts since app_mention replies stay in the same thread.
@@ -255,6 +259,7 @@ def _regex_extract_booking_window(text: str, timezone: str) -> dict | None:
     end_iso = f"{target_date.isoformat()}T{eh:02d}:{em:02d}:00{offset}"
     return {"can_book": True, "start_iso": start_iso, "end_iso": end_iso}
 
+
 def get_session(thread_ts: str) -> dict | None:
     session = sessions.get(thread_ts)
     if session is None:
@@ -264,14 +269,18 @@ def get_session(thread_ts: str) -> dict | None:
         return None
     return session
 
+
 def _backend_base() -> str:
     return (API_ENDPOINT or "").rstrip("/")
+
 
 def _backend_headers() -> dict:
     return {"X-Backend-Key": BACKEND_API_KEY or ""}
 
+
 def _connect_url(state_id: str) -> str:
     return f"{_backend_base()}/connect/google?state_id={state_id}"
+
 
 def _poll_email_for_state(state_id: str, timeout_sec: int = 600, poll_every_sec: int = 2) -> str | None:
     deadline = time.time() + timeout_sec
@@ -289,6 +298,7 @@ def _poll_email_for_state(state_id: str, timeout_sec: int = 600, poll_every_sec:
         time.sleep(poll_every_sec)
     return None
 
+
 def _calendar_list(profile_email: str, max_results: int = 80) -> list[dict]:
     r = requests.get(
         f"{_backend_base()}/calendar/list",
@@ -298,6 +308,7 @@ def _calendar_list(profile_email: str, max_results: int = 80) -> list[dict]:
     )
     r.raise_for_status()
     return r.json()
+
 
 def _drive_search(profile_email: str, query: str, page_size: int = 10) -> list[dict]:
     # backend currently returns 10; this wrapper keeps signature future-proof
@@ -310,6 +321,7 @@ def _drive_search(profile_email: str, query: str, page_size: int = 10) -> list[d
     r.raise_for_status()
     return r.json()
 
+
 def _calendar_update_description(profile_email: str, event_id: str, description: str) -> dict:
     r = requests.post(
         f"{_backend_base()}/calendar/update_description",
@@ -319,6 +331,7 @@ def _calendar_update_description(profile_email: str, event_id: str, description:
     )
     r.raise_for_status()
     return r.json()
+
 
 def _calendar_create(
     profile_email: str,
@@ -344,6 +357,7 @@ def _calendar_create(
     r.raise_for_status()
     return r.json()
 
+
 def _iso_to_dt(iso_text: str) -> datetime:
     # Support Google-style UTC timestamps ending with Z.
     dt = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
@@ -352,6 +366,7 @@ def _iso_to_dt(iso_text: str) -> datetime:
         return dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
     return dt
 
+
 def _format_conflicts(conflicts: list[dict]) -> str:
     if not conflicts:
         return ""
@@ -359,6 +374,7 @@ def _format_conflicts(conflicts: list[dict]) -> str:
     for c in conflicts[:8]:
         lines.append(f"- {c['email']}: {c['summary']} ({c['start']} to {c['end']})")
     return "\n".join(lines)
+
 
 def _find_conflicts(emails: list[str], start_iso: str, end_iso: str) -> list[dict]:
     start_dt = _iso_to_dt(start_iso)
@@ -384,6 +400,7 @@ def _find_conflicts(emails: list[str], start_iso: str, end_iso: str) -> list[dic
                     }
                 )
     return conflicts
+
 
 def _extract_suggested_slots(raw: str, timezone: str) -> list[dict]:
     tz = zoneinfo_or_utc(timezone)
@@ -565,6 +582,7 @@ def _append_materials_bullets(existing_description: str, bullets: list[str]) -> 
     parts.extend(new_lines)
     return "\n".join(parts).strip()
 
+
 def _snap_booking_if_llm_past(booking: dict, timezone: str) -> dict:
     """If Gemini used a past year, roll start/end forward until start is in the future."""
     tz = zoneinfo_or_utc(timezone)
@@ -627,6 +645,7 @@ If no clear time range exists, return can_book=false and empty strings.
     if not data.get("start_iso") or not data.get("end_iso"):
         return None
     return _snap_booking_if_llm_past(data, timezone)
+
 
 def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone: str) -> None:
     try:
@@ -1070,7 +1089,6 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             except Exception as e:
                 print(f"Failed to send email: {e}")
 
-
             # Meeting flow: ask tagged owners to connect Google, then suggest common times.
             if task_data.get("task") == "meeting" and task_data.get("owners"):
                 owners_mentions = task_data["owners"]
@@ -1187,6 +1205,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
         sessions.pop(thread_ts, None)
         send_slack_message_with_fallback(channel, FALLBACK_MESSAGE, thread_ts=thread_ts)
 
+
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     # Guard against oversized payloads before reading body
@@ -1270,6 +1289,7 @@ def health():
 
     code = 200 if status["status"] == "ok" else 503
     return jsonify(status), code
+
 
 if __name__ == "__main__":
     # For auto reload, run: flask --app app run --port 3000 --reload

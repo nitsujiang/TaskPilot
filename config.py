@@ -15,6 +15,7 @@ def require_env(name: str) -> str:
         raise RuntimeError(f"Required env var {name} is not set")
     return v
 
+
 # --- General ---
 APP_VERSION = os.getenv("APP_VERSION", "1.0")
 

@@ -43,9 +43,7 @@ def _reminder_interval(urgency: str | None, days_left: float) -> timedelta:
 
 
 def send_reminders(db):
-    """
-    Checks open tasks/meetings and sends urgency-aware reminders.
-    """
+    """Check open tasks and meetings and send urgency-aware reminders."""
     tasks = db.get_upcoming_tasks(within_hours=24 * 14)
     now = datetime.now(timezone.utc)
     for task in tasks:
@@ -81,6 +79,7 @@ def send_reminders(db):
                 db.mark_email_reminder_sent(task.get("id"), recipient)
             except Exception as e:
                 print(f"Failed to send reminder email to {recipient}: {e}")
+
 
 def start_scheduler(db):
     scheduler = BackgroundScheduler()

@@ -67,6 +67,3 @@ def send_email(to, subject, body, profile: str | None = None):
             timeout=30,
         )
         r.raise_for_status()
-
-
-    

@@ -13,11 +13,7 @@ def zoneinfo_or_utc(tz_name: str | None) -> ZoneInfo:
 
 
 def is_valid_deadline(deadline_str: str) -> bool:
-    """
-    Validates an ISO 8601 string returned by Gemini.
-    Returns True if it's a valid ISO 8601 string, False if it's an invalid format or empty
-    """
-
+    """Return True if ``deadline_str`` is non-empty and parses as ISO 8601 via ``datetime.fromisoformat``."""
     if not deadline_str:
         return False
 

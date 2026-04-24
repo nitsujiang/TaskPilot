@@ -14,6 +14,7 @@ FALLBACK_MESSAGE = "Sorry, I had trouble processing that message. Please try aga
 bot_info = slack_client.auth_test()
 BOT_USER_ID = bot_info["user_id"]
 
+
 def get_user_timezone(user_id: str) -> str:
     try:
         user_info = slack_client.users_info(user=user_id)
@@ -49,15 +50,18 @@ def resolve_owner_mentions_to_emails(owners: list[str]) -> list[str]:
             out.append(email)
     return out
 
+
 _members_cache = None
 _members_cache_time = 0
 MEMBERS_CACHE_TTL = 300  # 5 minutes; may become stale if members change, but reduces API calls for large workspaces.
 
+
 def search_workspace_members(query: str) -> list:
     """
-    Searches workspace members by name query.
-    Returns list of {name, user_id} for non-bot, active members that match.
-    Caches the full member list for 5 minutes to avoid repeated API calls.
+    Search workspace members by name (substring match).
+
+    Return a list of ``{"name", "user_id"}`` for active, non-bot members.
+    Cache the full member list for five minutes to limit API calls.
     """
     global _members_cache, _members_cache_time
 
@@ -79,6 +83,7 @@ def search_workspace_members(query: str) -> list:
         print(f"Failed to fetch workspace members: {e.response['error']}")
         return []
 
+
 def send_slack_message(channel: str, text: str, thread_ts: str = None) -> bool:
     try:
         slack_client.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
@@ -86,6 +91,7 @@ def send_slack_message(channel: str, text: str, thread_ts: str = None) -> bool:
     except SlackApiError as e:
         print(f"Failed to send message to Slack: {e.response['error']}")
         return False
+
 
 def send_slack_message_with_fallback(channel: str, text: str, thread_ts: str = None) -> None:
     if not send_slack_message(channel, text, thread_ts):

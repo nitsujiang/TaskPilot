@@ -5,12 +5,15 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 from config import DATABASE_URL
 
+
 def _conn():
     return psycopg2.connect(DATABASE_URL)
 
-# Expose a simple connection function for other modules to use. 
-# Each call creates a new connection, so callers should use it in a context manager (with statement) to ensure proper cleanup
+
+# Expose a simple connection factory for other modules (`conn` aliases `_conn`).
+# Each call opens a new connection; callers should use a context manager (`with conn() as c:`) for cleanup.
 conn = _conn
+
 
 def _parse_deadline(deadline_text: str | None):
     """
@@ -29,12 +32,14 @@ def _parse_deadline(deadline_text: str | None):
     except Exception:
         return None
 
+
 def _init_from_sql_file(filename: str):
     sql_path = os.path.join(os.path.dirname(__file__), filename)
     with _conn() as conn:
         with conn.cursor() as cursor:
             with open(sql_path) as f:
                 cursor.execute(f.read())
+
 
 def init_db():
     """
@@ -76,6 +81,7 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS last_email_reminder_by_recipient JSONB NOT NULL DEFAULT '{}'::jsonb
                 """
             )
+
 
 def save_task(task_data: dict):
     """

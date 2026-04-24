@@ -70,14 +70,15 @@ class TaskExtraction(BaseModel):
     urgency: Optional[Literal["high", "medium", "low"]] = None
     missing_infos: List[Literal["task", "title", "description", "owners", "deadline", "urgency"]] = []
 
+
 def call_gemini(prompt: str, schema: type[BaseModel] = None) -> str | dict:
     """
-    Calls Gemini with a prompt.
-    If schema is provided, returns a parsed dict with JSON mode enabled.
-    Otherwise returns a plain text string.
+    Call Gemini with ``prompt``.
 
-    On transport/API failure, returns empty dict/string and sets a user hint readable via
-    `take_last_gemini_user_hint()` (quota, busy, key issues). Typos in user text do not cause these.
+    If ``schema`` is set, return a parsed dict (JSON mode). Otherwise return plain text.
+
+    On transport/API failure, return an empty dict or string and set a user hint via
+    ``take_last_gemini_user_hint()`` (quota, busy, key issues). User typos alone do not trigger these.
     """
     global _last_gemini_user_hint
     _last_gemini_user_hint = None

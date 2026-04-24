@@ -41,9 +41,11 @@ SCOPES = [
     "openid",
 ]
 
+
 @app.on_event("startup")
 def startup():
     init_db()
+
 
 def client_config():
     return {
@@ -56,6 +58,7 @@ def client_config():
         }
     }
 
+
 def sign_state(payload: dict) -> str:
     secret = STATE_SIGNING_SECRET.encode("utf-8")
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -63,6 +66,7 @@ def sign_state(payload: dict) -> str:
     blob = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
     sigb = base64.urlsafe_b64encode(sig).decode("utf-8").rstrip("=")
     return f"{blob}.{sigb}"
+
 
 def verify_state(state: str) -> dict:
     secret = STATE_SIGNING_SECRET.encode("utf-8")
@@ -77,9 +81,11 @@ def verify_state(state: str) -> dict:
         raise HTTPException(status_code=400, detail="Bad state signature.")
     return json.loads(raw.decode("utf-8"))
 
+
 def require_key(request: Request):
     if request.headers.get("X-Backend-Key") != BACKEND_API_KEY:
         raise HTTPException(status_code=401, detail="Missing or invalid X-Backend-Key.")
+
 
 def load_creds(profile: str) -> Credentials:
     c = conn()
@@ -93,6 +99,7 @@ def load_creds(profile: str) -> Credentials:
         return Credentials.from_authorized_user_info(info, scopes=SCOPES)
     finally:
         c.close()
+
 
 def save_creds(profile: str, creds: Credentials):
     c = conn()
@@ -110,10 +117,12 @@ def save_creds(profile: str, creds: Credentials):
     finally:
         c.close()
 
+
 def ensure_fresh(creds: Credentials) -> Credentials:
     if creds.expired and creds.refresh_token:
         creds.refresh(GoogleRequest())
     return creds
+
 
 @app.get("/connect/google")
 def connect_google(profile: str = "", state_id: str = ""):
@@ -154,6 +163,7 @@ def connect_google(profile: str = "", state_id: str = ""):
     if state_id:
         PENDING_FLOWS_BY_STATE_ID[state_id] = flow
     return RedirectResponse(auth_url)
+
 
 def _err_html(message: str) -> HTMLResponse:
     """Return HTML error page (status 200 so the browser displays it)."""
@@ -214,6 +224,7 @@ def google_callback(code: str, state: str):
     save_creds(profile, creds)
     return PlainTextResponse(f"Connected as {profile}. You can close this tab.")
 
+
 @app.get("/calendar/list")
 def calendar_list(request: Request, profile: str, max_results: int = 10):
     require_key(request)
@@ -238,6 +249,7 @@ def calendar_list(request: Request, profile: str, max_results: int = 10):
         }
         for e in events
     ]
+
 
 @app.get("/drive/search")
 def drive_search(request: Request, profile: str, query: str):
@@ -280,6 +292,7 @@ def drive_search(request: Request, profile: str, query: str):
         for it in items
         if it.get("id") and it.get("name")
     ]
+
 
 @app.post("/calendar/create")
 def calendar_create(

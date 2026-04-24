@@ -1,4 +1,3 @@
-# parser.py
 from agent.prompts import (
     TASK_EXTRACTION_PROMPT,
     CLARIFYING_QUESTION_PROMPT,
@@ -93,6 +92,7 @@ def _build_non_actionable_response(message: str) -> str:
     )
     return _prefix_optional_api_hint(api_hint, base)
 
+
 def _recompute_missing_infos(task_data: dict) -> dict:
     """
     Recomputes missing_infos from scratch based on current field values.
@@ -109,6 +109,7 @@ def _recompute_missing_infos(task_data: dict) -> dict:
         task_data["missing_infos"].append("owners")
         del task_data["_owners_need_clarification"]
     return task_data
+
 
 def _resolve_invalid_owners(invalid_owners: list) -> tuple[list, str]:
     """
@@ -135,6 +136,7 @@ def _resolve_invalid_owners(invalid_owners: list) -> tuple[list, str]:
 
     suggestion_message = " ".join(suggestions)
     return resolved, suggestion_message
+
 
 def _validate_owners(task_data: dict) -> dict:
     """
@@ -168,6 +170,7 @@ def _validate_owners(task_data: dict) -> dict:
 
     return task_data
 
+
 def extract_task(message: str, timezone: str = "UTC") -> dict:
     """
     Takes a Slack message and extracts task details.
@@ -186,11 +189,13 @@ def extract_task(message: str, timezone: str = "UTC") -> dict:
     task_data = _validate_owners(task_data)
     return _recompute_missing_infos(task_data)
 
+
 def needs_clarification(task_data: dict) -> bool:
     """
     Returns True if critical info is missing or unclear enough to need a follow-up question.
     """
     return len(task_data.get("missing_infos", [])) > 0
+
 
 def generate_clarifying_question(task_data: dict) -> str:
     missing = set(task_data.get("missing_infos") or [])
@@ -237,6 +242,7 @@ def generate_clarifying_question(task_data: dict) -> str:
     if llm_hint:
         return llm_hint
     return REPEAT_UNCLEAR_CLARIFY
+
 
 def process_clarification(reply: str, task_data: dict, channel: str, timezone: str = "UTC", thread_ts: str = None) -> dict:
     """
@@ -287,6 +293,7 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
         send_slack_message_with_fallback(channel, question, thread_ts=thread_ts)
 
     return task_data
+
 
 def process_message(message: str, channel: str, timezone: str = "UTC", thread_ts: str = None) -> dict:
     """
