@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from utils.slack import send_slack_message
 from utils.gmail_utils import send_email
+from utils.email_templates import format_task_email_body
 
 
 def _parse_iso(dt_text: str | None):
@@ -67,14 +68,7 @@ def send_reminders(db):
                 send_email(
                     to=recipient,
                     subject=f"Reminder: {task.get('title', '(no title)')} is due soon",
-                    body=(
-                        f"Task: {task.get('title', '(no title)')}\n"
-                        f"Type: {task.get('task', 'todo')}\n"
-                        f"Deadline: {task.get('deadline') or 'none'}\n"
-                        f"Urgency: {task.get('urgency') or 'n/a'}\n"
-                        f"Status: {task.get('status') or 'pending'}\n"
-                        f"Channel: {task.get('channel') or 'n/a'}"
-                    ),
+                    body=format_task_email_body(task, kind="reminder"),
                 )
                 db.mark_email_reminder_sent(task.get("id"), recipient)
             except Exception as e:

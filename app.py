@@ -1,7 +1,7 @@
 import secrets
 import requests
 from flask import Flask, request, jsonify
-from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION
+from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY
 from agent.parser import process_message, process_clarification
 import databases.db as db_module
 from databases.db import (
@@ -15,6 +15,7 @@ from databases.db import (
 )
 from agent.scheduler import start_scheduler
 from utils.gmail_utils import send_email
+from utils.email_templates import format_task_email_body
 from utils.slack import (
     send_slack_message_with_fallback,
     FALLBACK_MESSAGE,
@@ -1077,7 +1078,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                             "task_id": task_id,
                             "recipients": recipients,
                             "subject": f"Task Saved: {task_data.get('title', '(no title)')}",
-                            "body": f"Your task was saved successfully:\n\n{json.dumps(task_data, indent=2)}",
+                            "body": format_task_email_body(task_data, kind="initial"),
                         }
                     ).start()
                elif not task_data.get("send_initial_email", True):

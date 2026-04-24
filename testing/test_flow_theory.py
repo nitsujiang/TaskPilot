@@ -20,6 +20,31 @@ if str(ROOT) not in sys.path:
 class TestParserFlowTheory(unittest.TestCase):
     @patch("agent.parser.send_slack_message_with_fallback")
     @patch("agent.parser.call_gemini")
+    def test_message_mentions_backfill_owner_even_if_llm_omits(self, mock_gemini, mock_send):
+        """If LLM omits owners, explicit Slack mentions from the message should still be used."""
+        mock_gemini.return_value = {
+            "task": "meeting",
+            "title": "Productivity 1",
+            "description": "TaskPilot test",
+            "owners": [],
+            "deadline": None,
+            "urgency": "high",
+            "missing_infos": [],
+        }
+        from agent.parser import process_message
+
+        out = process_message(
+            "I want to book a meeting with <@U08RC56EE14> title \"P\" description \"D\" high",
+            channel="C0TEST",
+            timezone="America/New_York",
+            thread_ts="0.5",
+        )
+        self.assertIn("<@U08RC56EE14>", out.get("owners", []))
+        self.assertNotIn("owners", out.get("missing_infos", []))
+        mock_send.assert_not_called()
+
+    @patch("agent.parser.send_slack_message_with_fallback")
+    @patch("agent.parser.call_gemini")
     def test_meeting_missing_urgency_triggers_clarification(self, mock_gemini, mock_send):
         """LLM returns structured meeting; parser recomputes missing urgency."""
         mock_gemini.return_value = {

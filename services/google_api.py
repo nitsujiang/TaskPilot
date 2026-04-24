@@ -387,6 +387,28 @@ def profiles_check(request: Request, profile: str):
         c.close()
 
 
+@app.get("/profiles/connected")
+def profiles_connected(request: Request, limit: int = 20):
+    """List connected Google profile emails (most recently updated first)."""
+    require_key(request)
+    c = conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT profile
+                FROM profiles
+                ORDER BY created_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (max(1, min(int(limit), 200)),),
+            )
+            rows = cur.fetchall() or []
+        return {"profiles": [r[0] for r in rows if r and r[0]]}
+    finally:
+        c.close()
+
+
 @app.get("/profiles/by_state")
 def profiles_by_state(request: Request, state_id: str):
     """After OAuth-first connect, notebook polls this with state_id to get the connected profile (email)."""

@@ -21,6 +21,19 @@ REPEAT_UNCLEAR_CLARIFY = (
 )
 
 
+def _extract_owner_mentions_from_text(text: str) -> list[str]:
+    """Return unique Slack user mentions like <@U123...>, excluding the bot."""
+    mentions = re.findall(r"<@([UW][A-Z0-9]+)>", text or "")
+    out: list[str] = []
+    for user_id in mentions:
+        m = f"<@{user_id}>"
+        if user_id == BOT_USER_ID:
+            continue
+        if m not in out:
+            out.append(m)
+    return out
+
+
 def _prefix_optional_api_hint(prefix: str | None, body: str) -> str:
     if prefix and body:
         return f"{prefix}\n\n{body}"
@@ -186,6 +199,12 @@ def extract_task(message: str, timezone: str = "UTC") -> dict:
         print(f"Invalid deadline format detected: {task_data['deadline']}")
         task_data["deadline"] = None
 
+    # Deterministic owner recovery: trust explicit Slack mentions from the original message.
+    mentioned_owners = _extract_owner_mentions_from_text(message)
+    if mentioned_owners:
+        existing = task_data.get("owners") or []
+        task_data["owners"] = list(dict.fromkeys(existing + mentioned_owners))
+
     task_data = _validate_owners(task_data)
     return _recompute_missing_infos(task_data)
 
@@ -280,6 +299,11 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
         existing_owners = task_data.get("owners") or []
         # merge without duplicates
         task_data["owners"] = list(dict.fromkeys(existing_owners + new_data["owners"]))
+    # Also merge any explicit Slack mentions present in the reply text.
+    reply_mentions = _extract_owner_mentions_from_text(reply)
+    if reply_mentions:
+        existing_owners = task_data.get("owners") or []
+        task_data["owners"] = list(dict.fromkeys(existing_owners + reply_mentions))
 
     if task_data.get("deadline") and not is_valid_deadline(task_data["deadline"]):
         print(f"Invalid deadline format detected: {task_data['deadline']}")
