@@ -1243,8 +1243,9 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             if pref is not None:
                 task_data["send_initial_email"] = pref
 
-        # Resolve self-referential terms ("myself", "me", "I") to the requester's mention
-        if re.search(r"\b(myself|me|i)\b", text, re.IGNORECASE):
+        # Resolve explicit self-assignment ("me", "myself") to the requester's mention.
+        # "I" is intentionally excluded — it appears as subject in almost every message.
+        if re.search(r"\b(myself|me)\b", text, re.IGNORECASE):
             requester = f"<@{user_id}>"
             owners = task_data.get("owners") or []
             if requester not in owners:
@@ -1295,6 +1296,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                 def todo_calendar_flow():
                     deadline_str = task_data["deadline"]
                     # Parse deadline; support date-only (YYYY-MM-DD) or datetime ISO strings.
+                    friendly_time = deadline_str  # fallback if parsing fails
                     try:
                         tz = zoneinfo_or_utc(timezone)
                         if "T" in deadline_str:
@@ -1304,9 +1306,12 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         else:
                             y, mo, d = [int(x) for x in deadline_str[:10].split("-")]
                             start_dt = datetime(y, mo, d, 9, 0, tzinfo=tz)
+                        # Convert to user's timezone for display
+                        start_dt_local = start_dt.astimezone(tz)
                         end_dt = start_dt + timedelta(hours=1)
                         start_iso = start_dt.isoformat(timespec="seconds")
                         end_iso = end_dt.isoformat(timespec="seconds")
+                        friendly_time = start_dt_local.strftime("%-I:%M %p, %b %-d %Y") + f" ({timezone})"
                     except Exception as e:
                         print(f"Todo calendar: failed to parse deadline '{deadline_str}': {e}")
                         return
@@ -1346,7 +1351,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     if created_count:
                         send_slack_message_with_fallback(
                             channel,
-                            f":calendar: Calendar reminder added for {created_count} owner(s) at {start_iso}.",
+                            f":calendar: Calendar reminder added for {created_count} owner(s) at {friendly_time}.",
                             thread_ts=thread_ts,
                         )
 
