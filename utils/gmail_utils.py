@@ -22,7 +22,7 @@ def _list_connected_profiles(limit: int = 20) -> list[str]:
     try:
         with c, c.cursor() as cur:
             cur.execute(
-                "SELECT profile FROM profiles WHERE profile NOT LIKE '__pending__%' ORDER BY created_at DESC NULLS LAST LIMIT %s",
+                "SELECT profile FROM profiles WHERE profile NOT LIKE '__pending__%%' ORDER BY created_at DESC NULLS LAST LIMIT %s",
                 (max(1, min(int(limit), 200)),),
             )
             rows = cur.fetchall() or []
