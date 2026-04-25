@@ -523,7 +523,12 @@ def _format_conflicts(conflicts: list[dict]) -> str:
         return ""
     lines = []
     for c in conflicts[:8]:
-        lines.append(f"- {c['email']}: {c['summary']} ({c['start']} to {c['end']})")
+        try:
+            start = _iso_to_dt(c["start"]).strftime("%-I:%M %p")
+            end = _iso_to_dt(c["end"]).strftime("%-I:%M %p, %b %-d")
+        except Exception:
+            start, end = c["start"], c["end"]
+        lines.append(f"- {c['summary']} ({start}–{end})")
     return "\n".join(lines)
 
 
@@ -1337,15 +1342,6 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                                          for sid in state_by_owner.values()}
                         emails_ready = [f.result() for f in as_completed(future_to_sid) if f.result()]
 
-                    # Warn about conflicts but still create — deadline is fixed.
-                    all_conflicts = []
-                    for email in emails_ready:
-                        try:
-                            conflicts = _find_conflicts([email], start_iso, end_iso)
-                            all_conflicts.extend(conflicts)
-                        except Exception:
-                            pass
-
                     created_count = 0
                     for email in emails_ready:
                         try:
@@ -1362,13 +1358,9 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                             print(f"Todo calendar create failed for {email}: {e}")
 
                     if created_count:
-                        conflict_note = (
-                            f"\n:warning: Heads up — there's a conflict at that time:\n{_format_conflicts(all_conflicts)}"
-                            if all_conflicts else ""
-                        )
                         send_slack_message_with_fallback(
                             channel,
-                            f":calendar: Calendar reminder added for {created_count} owner(s) at {friendly_time}.{conflict_note}",
+                            f":calendar: Calendar reminder set for {created_count} owner(s) at {friendly_time}.",
                             thread_ts=thread_ts,
                         )
 
