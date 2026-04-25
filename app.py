@@ -1,7 +1,10 @@
 import secrets
 import requests
-from flask import Flask, request, jsonify
-from config import SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY
+from flask import Flask, request, jsonify, redirect, make_response, abort
+from config import (
+    SLACK_SIGNING_SECRET, SLACK_BOT_TOKEN, API_ENDPOINT, BACKEND_API_KEY, APP_VERSION,
+    STATE_SIGNING_SECRET, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, APP_EXTERNAL_URL,
+)
 from agent.parser import process_message, process_clarification
 import databases.db as db_module
 from databases.db import (
@@ -33,12 +36,121 @@ import re
 import os
 import json
 import time
-from datetime import datetime, timedelta, time as dtime
+import hmac
+import base64
+import hashlib
+import html as html_module
+import urllib.request as urllib_request
+from datetime import datetime, timedelta, time as dtime, timezone
+from email.mime.text import MIMEText
 from pydantic import BaseModel
 from typing import Optional
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleRequest
+from googleapiclient.discovery import build
+from databases.db import conn as db_conn
 
 app = Flask(__name__)
 init_db()
+
+# ── Google OAuth / Calendar / Drive (merged from services/google_api.py) ──────
+
+GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
+]
+
+# In-memory OAuth state stores (reset on restart — acceptable for short-lived flows)
+_FLOW_STORE: dict = {}
+_PENDING_STATE_PROFILES: dict = {}
+_PENDING_FLOWS_BY_STATE_ID: dict = {}
+
+
+def _google_client_config() -> dict:
+    return {
+        "web": {
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [f"{APP_EXTERNAL_URL}/auth/google/callback"],
+        }
+    }
+
+
+def _sign_state(payload: dict) -> str:
+    secret = STATE_SIGNING_SECRET.encode("utf-8")
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sig = hmac.new(secret, raw, hashlib.sha256).digest()
+    blob = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+    sigb = base64.urlsafe_b64encode(sig).decode("utf-8").rstrip("=")
+    return f"{blob}.{sigb}"
+
+
+def _verify_state(state: str) -> dict:
+    secret = STATE_SIGNING_SECRET.encode("utf-8")
+    try:
+        blob, sigb = state.split(".", 1)
+        raw = base64.urlsafe_b64decode(blob + "==")
+        sig = base64.urlsafe_b64decode(sigb + "==")
+    except Exception:
+        abort(400, description="Bad state format.")
+    expected = hmac.new(secret, raw, hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expected):
+        abort(400, description="Bad state signature.")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _load_creds(profile: str) -> Credentials:
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute("SELECT creds_json FROM profiles WHERE profile = %s", (profile,))
+            row = cur.fetchone()
+        if not row:
+            abort(404, description=f"Unknown profile '{profile}'. Connect it first.")
+        return Credentials.from_authorized_user_info(json.loads(row[0]), scopes=GOOGLE_SCOPES)
+    finally:
+        c.close()
+
+
+def _save_creds(profile: str, creds: Credentials):
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO profiles(profile, creds_json, created_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (profile)
+                DO UPDATE SET creds_json = EXCLUDED.creds_json, created_at = EXCLUDED.created_at
+                """,
+                (profile, creds.to_json(), datetime.now(timezone.utc).isoformat()),
+            )
+    finally:
+        c.close()
+
+
+def _ensure_fresh(creds: Credentials) -> Credentials:
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+    return creds
+
+
+def _err_html(message: str):
+    escaped = html_module.escape(str(message))
+    return make_response(
+        f"<!DOCTYPE html><html><head><meta charset='utf-8'><title>Sign-in error</title></head>"
+        f"<body style='font-family:sans-serif;max-width:520px;margin:2em auto;padding:1em'>"
+        f"<h2>Sign-in error</h2><p>{escaped}</p>"
+        f"<p>Close this tab and try connecting again.</p></body></html>",
+        200,
+    )
 
 _scheduler = None
 
@@ -271,67 +383,77 @@ def get_session(thread_ts: str) -> dict | None:
     return session
 
 
-def _backend_base() -> str:
-    return (API_ENDPOINT or "").rstrip("/")
-
-
-def _backend_headers() -> dict:
-    return {"X-Backend-Key": BACKEND_API_KEY or ""}
-
-
 def _connect_url(state_id: str) -> str:
-    return f"{_backend_base()}/connect/google?state_id={state_id}"
+    return f"{APP_EXTERNAL_URL.rstrip('/')}/connect/google?state_id={state_id}"
 
 
 def _poll_email_for_state(state_id: str, timeout_sec: int = 600, poll_every_sec: int = 2) -> str | None:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        r = requests.get(
-            f"{_backend_base()}/profiles/by_state",
-            params={"state_id": state_id},
-            headers=_backend_headers(),
-            timeout=20,
-        )
-        if r.status_code == 200:
-            email = (r.json().get("profile") or "").strip()
-            if email:
-                return email
+        email = _PENDING_STATE_PROFILES.pop(state_id, None)
+        if email:
+            return email
         time.sleep(poll_every_sec)
     return None
 
 
 def _calendar_list(profile_email: str, max_results: int = 80) -> list[dict]:
-    r = requests.get(
-        f"{_backend_base()}/calendar/list",
-        params={"profile": profile_email, "max_results": max_results},
-        headers=_backend_headers(),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+    creds = _ensure_fresh(_load_creds(profile_email))
+    service = build("calendar", "v3", credentials=creds)
+    now = datetime.now(timezone.utc).isoformat()
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=now,
+        maxResults=int(max_results),
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+    events = events_result.get("items", [])
+    return [
+        {
+            "summary": e.get("summary", "(no title)"),
+            "start": e["start"].get("dateTime", e["start"].get("date")),
+            "end": e["end"].get("dateTime", e["end"].get("date")),
+        }
+        for e in events
+    ]
 
 
 def _drive_search(profile_email: str, query: str, page_size: int = 10) -> list[dict]:
-    # backend currently returns 10; this wrapper keeps signature future-proof
-    r = requests.get(
-        f"{_backend_base()}/drive/search",
-        params={"profile": profile_email, "query": query},
-        headers=_backend_headers(),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+    creds = _ensure_fresh(_load_creds(profile_email))
+    service = build("drive", "v3", credentials=creds)
+    query = (query or "").strip()
+    words = [w.lower() for w in query.replace("\n", " ").split(" ") if len(w.strip()) >= 3]
+    seen = []
+    for w in words:
+        w = w.strip(" ,.;:()[]{}\"")
+        if not w or w in seen:
+            continue
+        seen.append(w)
+        if len(seen) >= 6:
+            break
+    if not seen:
+        seen = [query[:40]] if query else ["meeting"]
+    clauses = [f"fullText contains '{w.replace(chr(39), chr(92)+chr(39))}'" for w in seen]
+    results = service.files().list(
+        q=" or ".join(clauses),
+        pageSize=10,
+        fields="files(id, name, mimeType, webViewLink)",
+    ).execute()
+    return [
+        {"name": it.get("name"), "id": it.get("id"), "mimeType": it.get("mimeType"), "webViewLink": it.get("webViewLink")}
+        for it in results.get("files", [])
+        if it.get("id") and it.get("name")
+    ]
 
 
 def _calendar_update_description(profile_email: str, event_id: str, description: str) -> dict:
-    r = requests.post(
-        f"{_backend_base()}/calendar/update_description",
-        params={"profile": profile_email, "event_id": event_id, "description": description},
-        headers=_backend_headers(),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+    creds = _ensure_fresh(_load_creds(profile_email))
+    service = build("calendar", "v3", credentials=creds)
+    ev = service.events().patch(
+        calendarId="primary", eventId=event_id, body={"description": description or ""}
+    ).execute()
+    return {"id": ev.get("id"), "htmlLink": ev.get("htmlLink")}
 
 
 def _calendar_create(
@@ -342,21 +464,22 @@ def _calendar_create(
     end_iso: str,
     timezone_name: str,
 ) -> dict:
-    r = requests.post(
-        f"{_backend_base()}/calendar/create",
-        params={
-            "profile": profile_email,
-            "summary": summary,
-            "description": description,
-            "start_iso": start_iso,
-            "end_iso": end_iso,
-            "timezone_name": timezone_name,
-        },
-        headers=_backend_headers(),
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()
+    creds = _ensure_fresh(_load_creds(profile_email))
+    service = build("calendar", "v3", credentials=creds)
+    body = {
+        "summary": summary.strip() or "(no title)",
+        "description": description or "",
+        "start": {"dateTime": start_iso, "timeZone": timezone_name},
+        "end": {"dateTime": end_iso, "timeZone": timezone_name},
+    }
+    ev = service.events().insert(calendarId="primary", body=body).execute()
+    return {
+        "id": ev.get("id"),
+        "htmlLink": ev.get("htmlLink"),
+        "summary": ev.get("summary"),
+        "start": ev.get("start", {}).get("dateTime"),
+        "end": ev.get("end", {}).get("dateTime"),
+    }
 
 
 def _iso_to_dt(iso_text: str) -> datetime:
@@ -1339,6 +1462,88 @@ def health():
 
     code = 200 if status["status"] == "ok" else 503
     return jsonify(status), code
+
+
+@app.route("/connect/google")
+def connect_google():
+    state_id = request.args.get("state_id", "").strip()
+    profile = request.args.get("profile", "").strip()
+    if state_id:
+        profile = "__pending__"
+    elif not profile:
+        abort(400, description="Provide profile=YOUR_EMAIL or state_id=...")
+
+    redirect_uri = f"{APP_EXTERNAL_URL.rstrip('/')}/auth/google/callback"
+    flow = Flow.from_client_config(_google_client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri)
+    state = _sign_state({
+        "profile": profile,
+        "state_id": state_id or None,
+        "nonce": secrets.token_urlsafe(16),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+    auth_url, _ = flow.authorization_url(
+        state=state, access_type="offline", include_granted_scopes="true", prompt="consent"
+    )
+    _FLOW_STORE[state] = flow
+    if state_id:
+        _PENDING_FLOWS_BY_STATE_ID[state_id] = flow
+    return redirect(auth_url)
+
+
+@app.route("/auth/google/callback")
+def google_callback():
+    code = request.args.get("code", "")
+    state = request.args.get("state", "")
+    try:
+        payload = _verify_state(state)
+    except Exception as e:
+        return _err_html(f"Invalid state: {e}")
+
+    profile = payload["profile"]
+    state_id = payload.get("state_id")
+    flow = _FLOW_STORE.pop(state, None) or (_PENDING_FLOWS_BY_STATE_ID.pop(state_id, None) if state_id else None)
+    if flow is None:
+        return _err_html("Login state expired or server restarted. Please try connecting again.")
+
+    try:
+        flow.fetch_token(code=code)
+    except Exception as e:
+        return _err_html(f"Token exchange failed: {e}")
+
+    creds = flow.credentials
+    if state_id and profile == "__pending__":
+        access_token = getattr(creds, "token", None) or getattr(creds, "access_token", None)
+        if not access_token:
+            return _err_html("No access token; cannot fetch email.")
+        req = urllib_request.Request(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            return _err_html(f"Userinfo request failed: {e}")
+        profile = data.get("email", "").strip()
+        if not profile:
+            return _err_html("Could not get email from Google.")
+        _PENDING_STATE_PROFILES[state_id] = profile
+
+    _save_creds(profile, creds)
+    return make_response(f"Connected as {profile}. You can close this tab.", 200)
+
+
+@app.route("/profiles/by_state")
+def profiles_by_state():
+    if request.headers.get("X-Backend-Key") != BACKEND_API_KEY:
+        abort(401)
+    state_id = request.args.get("state_id", "").strip()
+    if not state_id:
+        abort(400)
+    profile = _PENDING_STATE_PROFILES.pop(state_id, None)
+    if profile is None:
+        abort(404)
+    return jsonify({"profile": profile})
 
 
 if __name__ == "__main__":
