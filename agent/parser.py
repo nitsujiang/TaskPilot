@@ -305,11 +305,10 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
     prev_missing = task_data.get("missing_infos") or []
     if "description" in prev_missing and not task_data.get("description"):
         stripped = reply.strip()
-        # Require substance: at least 3 words and not a bare urgency/command reply.
+        # Reject single-word urgency replies and standalone commands; accept everything else.
         if (stripped
-                and len(stripped.split()) >= 3
-                and not re.search(r"\b(book|schedule|create|remind|meeting|task)\b", stripped, re.IGNORECASE)
-                and not _normalize_urgency_guess(stripped)):
+                and not (len(stripped.split()) == 1 and _normalize_urgency_guess(stripped))
+                and not re.search(r"\b(book|schedule|create|remind|meeting|task)\b", stripped, re.IGNORECASE)):
             task_data["description"] = stripped
 
     # Owners — append new owners rather than replace
