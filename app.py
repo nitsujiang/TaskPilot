@@ -1501,14 +1501,24 @@ def connect_google():
 
     redirect_uri = f"{APP_EXTERNAL_URL.rstrip('/')}/auth/google/callback"
     flow = Flow.from_client_config(_google_client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri)
+    code_verifier = secrets.token_urlsafe(40)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b"=").decode()
     state = _sign_state({
         "profile": profile,
         "state_id": state_id or None,
         "nonce": secrets.token_urlsafe(16),
         "ts": datetime.now(timezone.utc).isoformat(),
+        "cv": code_verifier,
     })
     auth_url, _ = flow.authorization_url(
-        state=state, access_type="offline", include_granted_scopes="true", prompt="consent"
+        state=state,
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
     )
     return redirect(auth_url)
 
@@ -1525,10 +1535,11 @@ def google_callback():
     profile = payload["profile"]
     state_id = payload.get("state_id")
 
+    code_verifier = payload.get("cv") or ""
     redirect_uri = f"{APP_EXTERNAL_URL.rstrip('/')}/auth/google/callback"
     flow = Flow.from_client_config(_google_client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri)
     try:
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code, code_verifier=code_verifier or None)
     except Exception as e:
         return _err_html(f"Token exchange failed: {e}")
 
