@@ -1484,9 +1484,6 @@ def connect_google():
     auth_url, _ = flow.authorization_url(
         state=state, access_type="offline", include_granted_scopes="true", prompt="consent"
     )
-    _FLOW_STORE[state] = flow
-    if state_id:
-        _PENDING_FLOWS_BY_STATE_ID[state_id] = flow
     return redirect(auth_url)
 
 
@@ -1501,10 +1498,9 @@ def google_callback():
 
     profile = payload["profile"]
     state_id = payload.get("state_id")
-    flow = _FLOW_STORE.pop(state, None) or (_PENDING_FLOWS_BY_STATE_ID.pop(state_id, None) if state_id else None)
-    if flow is None:
-        return _err_html("Login state expired or server restarted. Please try connecting again.")
 
+    redirect_uri = f"{APP_EXTERNAL_URL.rstrip('/')}/auth/google/callback"
+    flow = Flow.from_client_config(_google_client_config(), scopes=GOOGLE_SCOPES, redirect_uri=redirect_uri)
     try:
         flow.fetch_token(code=code)
     except Exception as e:
