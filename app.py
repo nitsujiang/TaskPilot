@@ -478,9 +478,37 @@ def _booking_from_suggested_choice(text: str, slots: list[dict]) -> dict | None:
     return None
 
 
+def _wants_meeting_slot_regeneration(text: str) -> bool:
+    """
+    True when the user is asking for a fresh list of common meeting times.
+
+    Uses word-boundary style checks so we do not mis-trigger on words like
+    "sometimes" (contains "time") or "unavailable" (contains "available").
+    """
+    t = (text or "").lower()
+    if re.search(r"\b(re-?suggest|resuggest)\b", t):
+        return True
+    if re.search(r"\bsuggest(s|ing|ed|ions?)?\b", t):
+        return True
+    if re.search(r"\b(again|another|more|new|fresh|other)\b", t) and re.search(
+        r"\b(slots?|times?|options?|availability)\b", t
+    ):
+        return True
+    if re.search(r"\bfree\b", t) and re.search(r"\b(slots?|times?)\b", t):
+        return True
+    if re.search(r"\bavailable\b", t) and re.search(r"\b(slots?|times?)\b", t):
+        return True
+    if re.search(r"\btime\s+slots?\b", t):
+        return True
+    if re.search(r"\bcommon\s+(times?|slots?)\b", t):
+        return True
+    return False
+
+
 def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str], timezone: str) -> list[dict]:
-    events_by_email = {email: _calendar_list(email) for email in emails}
-    prompt = f"""
+    try:
+        events_by_email = {email: _calendar_list(email) for email in emails}
+        prompt = f"""
     You are a scheduling assistant.
     Find common meeting times for the next 7 days within business hours:
     - Mon-Fri
@@ -492,33 +520,46 @@ def _send_common_time_suggestions(channel: str, thread_ts: str, emails: list[str
     Weekday, YYYY-MM-DD HH:MM-HH:MM ({timezone})
     Do not include explanations, availability dumps, or extra text.
     """
-    suggestions = call_gemini(prompt)
-    if not suggestions:
-        hint = take_last_gemini_user_hint()
+        suggestions = call_gemini(prompt)
+        if isinstance(suggestions, dict):
+            suggestions = ""
+        elif not isinstance(suggestions, str):
+            suggestions = str(suggestions or "")
+        if not suggestions.strip():
+            hint = take_last_gemini_user_hint()
+            send_slack_message_with_fallback(
+                channel,
+                hint
+                or (
+                    "I couldn't generate time suggestions just now. "
+                    "Please try again in a few minutes, or say a specific day/time to book."
+                ),
+                thread_ts=thread_ts,
+            )
+            return []
+        slots = _extract_suggested_slots(suggestions, timezone)
+        if not slots:
+            send_slack_message_with_fallback(
+                channel,
+                "I couldn't parse suggested slots cleanly. Please share a specific date/time (e.g. Friday 2pm).",
+                thread_ts=thread_ts,
+            )
+            return []
         send_slack_message_with_fallback(
             channel,
-            hint
-            or (
-                "I couldn't generate time suggestions just now. "
-                "Please try again in a few minutes, or say a specific day/time to book."
-            ),
+            _format_slot_options(slots, timezone),
+            thread_ts=thread_ts,
+        )
+        return slots
+    except Exception as e:
+        print(f"Error generating common time suggestions: {e}")
+        send_slack_message_with_fallback(
+            channel,
+            "I hit an error while fetching calendars or generating suggestions. "
+            "Please try again in a moment, or say a specific day/time to book.",
             thread_ts=thread_ts,
         )
         return []
-    slots = _extract_suggested_slots(suggestions, timezone)
-    if not slots:
-        send_slack_message_with_fallback(
-            channel,
-            "I couldn't parse suggested slots cleanly. Please share a specific date/time (e.g. Friday 2pm).",
-            thread_ts=thread_ts,
-        )
-        return []
-    send_slack_message_with_fallback(
-        channel,
-        _format_slot_options(slots, timezone),
-        thread_ts=thread_ts,
-    )
-    return slots
 
 
 def _drive_query_from_task(title: str, description: str) -> str:
@@ -615,13 +656,15 @@ def _snap_booking_if_llm_past(booking: dict, timezone: str) -> dict:
     return booking
 
 
-def _extract_booking_window(text: str, timezone: str) -> dict | None:
+def _extract_booking_window(text: str, timezone: str, *, allow_llm: bool = True) -> dict | None:
     wd = _regex_weekday_and_time(text, timezone)
     if wd:
         return wd
     regex_booking = _regex_extract_booking_window(text, timezone)
     if regex_booking:
         return regex_booking
+    if not allow_llm:
+        return None
     now = datetime.now(zoneinfo_or_utc(timezone)).replace(microsecond=0)
     prompt = f"""
 You are extracting a meeting time from user text.
@@ -958,9 +1001,19 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
 
         followup = meeting_followups.get(thread_ts)
         if followup:
-            booking = _extract_booking_window(text, timezone)
+            # Prefer slot picks and regex times before any Gemini booking extraction.
+            booking = _booking_from_suggested_choice(text, followup.get("suggested_slots") or [])
             if not booking:
-                booking = _booking_from_suggested_choice(text, followup.get("suggested_slots") or [])
+                booking = _extract_booking_window(text, timezone, allow_llm=False)
+            # "Suggest" path uses its own LLM call — skip BookingWindow Gemini for these replies.
+            if not booking and _wants_meeting_slot_regeneration(text):
+                slots = _send_common_time_suggestions(channel, thread_ts, followup["emails"], timezone)
+                if slots:
+                    followup["suggested_slots"] = slots
+                    meeting_followups[thread_ts] = followup
+                return
+            if not booking:
+                booking = _extract_booking_window(text, timezone, allow_llm=True)
             if booking:
                 conflicts = _find_conflicts(
                     followup["emails"],
@@ -1016,13 +1069,6 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         "- Or reply `suggest` and I’ll suggest a few files from your Drive",
                         thread_ts=thread_ts,
                     )
-                return
-            lower_text = text.lower()
-            if any(k in lower_text for k in ["suggest", "available", "free", "slot", "time"]):
-                slots = _send_common_time_suggestions(channel, thread_ts, followup["emails"], timezone)
-                if slots:
-                    followup["suggested_slots"] = slots
-                    meeting_followups[thread_ts] = followup
                 return
             send_slack_message_with_fallback(
                 channel,
