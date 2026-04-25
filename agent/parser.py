@@ -293,6 +293,15 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
     if new_data.get("task") and not task_data.get("task"):
         task_data["task"] = new_data["task"]
 
+    # Fallback: if description was missing and Gemini still returned null,
+    # use the raw reply as the description — the user is clearly answering that question.
+    prev_missing = task_data.get("missing_infos") or []
+    if "description" in prev_missing and not task_data.get("description"):
+        stripped = reply.strip()
+        # Only accept as description if it doesn't look like a new standalone command
+        if stripped and not re.search(r"\b(book|schedule|create|remind|meeting|task)\b", stripped, re.IGNORECASE):
+            task_data["description"] = stripped
+
     # Owners — append new owners rather than replace
     if new_data.get("owners"):
         # If owners was previously None, treat it as an empty list for merging.

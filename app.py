@@ -32,6 +32,7 @@ from slack_sdk import WebClient
 from slack_sdk.signature import SignatureVerifier
 from collections import OrderedDict, defaultdict
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import os
 import json
@@ -1242,6 +1243,13 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             if pref is not None:
                 task_data["send_initial_email"] = pref
 
+        # Resolve self-referential terms ("myself", "me", "I") to the requester's mention
+        if re.search(r"\b(myself|me|i)\b", text, re.IGNORECASE):
+            requester = f"<@{user_id}>"
+            owners = task_data.get("owners") or []
+            if requester not in owners:
+                task_data["owners"] = list(dict.fromkeys(owners + [requester]))
+
         if task_data.get("missing_infos"):
             # Still needs clarification, keep session alive and update last_active
             sessions[thread_ts] = {
@@ -1282,6 +1290,68 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             except Exception as e:
                 print(f"Failed to send email: {e}")
 
+            # Todo flow: create a calendar event at the deadline for each owner.
+            if task_data.get("task") == "todo" and task_data.get("deadline") and task_data.get("owners"):
+                def todo_calendar_flow():
+                    deadline_str = task_data["deadline"]
+                    # Parse deadline; support date-only (YYYY-MM-DD) or datetime ISO strings.
+                    try:
+                        tz = zoneinfo_or_utc(timezone)
+                        if "T" in deadline_str:
+                            start_dt = _iso_to_dt(deadline_str)
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=tz)
+                        else:
+                            y, mo, d = [int(x) for x in deadline_str[:10].split("-")]
+                            start_dt = datetime(y, mo, d, 9, 0, tzinfo=tz)
+                        end_dt = start_dt + timedelta(hours=1)
+                        start_iso = start_dt.isoformat(timespec="seconds")
+                        end_iso = end_dt.isoformat(timespec="seconds")
+                    except Exception as e:
+                        print(f"Todo calendar: failed to parse deadline '{deadline_str}': {e}")
+                        return
+
+                    owner_mentions = task_data["owners"]
+                    state_by_owner = {}
+                    for mention in owner_mentions:
+                        state_id = secrets.token_urlsafe(16)
+                        state_by_owner[mention] = state_id
+                        send_slack_message_with_fallback(
+                            channel,
+                            f"{mention} connect Google to get a calendar reminder for this task: {_connect_url(state_id)}",
+                            thread_ts=thread_ts,
+                        )
+
+                    # Poll all owners in parallel so no one waits on someone else.
+                    with ThreadPoolExecutor(max_workers=max(1, len(state_by_owner))) as pool:
+                        future_to_sid = {pool.submit(_poll_email_for_state, sid): sid
+                                         for sid in state_by_owner.values()}
+                        emails_ready = [f.result() for f in as_completed(future_to_sid) if f.result()]
+
+                    created_count = 0
+                    for email in emails_ready:
+                        try:
+                            _calendar_create(
+                                profile_email=email,
+                                summary=task_data.get("title") or "Task",
+                                description=task_data.get("description") or "",
+                                start_iso=start_iso,
+                                end_iso=end_iso,
+                                timezone_name=timezone,
+                            )
+                            created_count += 1
+                        except Exception as e:
+                            print(f"Todo calendar create failed for {email}: {e}")
+
+                    if created_count:
+                        send_slack_message_with_fallback(
+                            channel,
+                            f":calendar: Calendar reminder added for {created_count} owner(s) at {start_iso}.",
+                            thread_ts=thread_ts,
+                        )
+
+                threading.Thread(target=todo_calendar_flow, daemon=True).start()
+
             # Meeting flow: ask tagged owners to connect Google, then suggest common times.
             if task_data.get("task") == "meeting" and task_data.get("owners"):
                 organizer_mention = f"<@{user_id}>"
@@ -1302,12 +1372,11 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                             thread_ts=thread_ts,
                         )
 
-                    # 2) Poll backend until each owner’s email is available
-                    emails = []
-                    for _, state_id in state_by_owner.items():
-                        email = _poll_email_for_state(state_id)
-                        if email:
-                            emails.append(email)
+                    # 2) Poll all participants in parallel — no one waits on someone else.
+                    with ThreadPoolExecutor(max_workers=max(1, len(state_by_owner))) as pool:
+                        future_to_sid = {pool.submit(_poll_email_for_state, sid): sid
+                                         for sid in state_by_owner.values()}
+                        emails = [f.result() for f in as_completed(future_to_sid) if f.result()]
 
                     if len(emails) < 1: # minimum of 1 attendee to compute common times
                         send_slack_message_with_fallback(
