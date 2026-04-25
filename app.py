@@ -1138,13 +1138,16 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
 
             # Meeting flow: ask tagged owners to connect Google, then suggest common times.
             if task_data.get("task") == "meeting" and task_data.get("owners"):
+                organizer_mention = f"<@{user_id}>"
                 owners_mentions = task_data["owners"]
+                # Include organizer so their calendar is checked too, avoiding duplicates
+                all_participants = list(dict.fromkeys([organizer_mention] + owners_mentions))
                 requested_booking = _extract_booking_window(text, timezone)
 
                 def oauth_and_suggest():
-                    # 1) Ask tagged owners to connect Google
+                    # 1) Ask all participants (organizer + attendees) to connect Google
                     state_by_owner = {}  # mention -> state_id
-                    for mention in owners_mentions:
+                    for mention in all_participants:
                         state_id = secrets.token_urlsafe(16)
                         state_by_owner[mention] = state_id
                         send_slack_message_with_fallback(
