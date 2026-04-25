@@ -1,48 +1,70 @@
+import base64
+import json
+from email.mime.text import MIMEText
 from typing import Iterable
 
-import requests
-
-from config import API_ENDPOINT, BACKEND_API_KEY, PROFILE_EMAIL
-
-
-def _backend_base() -> str:
-    return (API_ENDPOINT or "").rstrip("/")
-
-
-def _backend_headers() -> dict:
-    return {"X-Backend-Key": BACKEND_API_KEY or ""}
+from config import PROFILE_EMAIL
+from databases.db import conn as db_conn
 
 
 def _is_connected_profile(email: str) -> bool:
-    r = requests.get(
-        f"{_backend_base()}/profiles/check",
-        params={"profile": email},
-        headers=_backend_headers(),
-        timeout=15,
-    )
-    if r.status_code != 200:
-        return False
-    return bool((r.json() or {}).get("connected"))
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM profiles WHERE profile = %s", (email.strip(),))
+            return cur.fetchone() is not None
+    finally:
+        c.close()
 
 
 def _list_connected_profiles(limit: int = 20) -> list[str]:
-    r = requests.get(
-        f"{_backend_base()}/profiles/connected",
-        params={"limit": max(1, int(limit))},
-        headers=_backend_headers(),
-        timeout=15,
-    )
-    if r.status_code != 200:
-        return []
-    profiles = (r.json() or {}).get("profiles") or []
-    return [str(p).strip() for p in profiles if str(p).strip()]
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute(
+                "SELECT profile FROM profiles WHERE profile NOT LIKE '__pending__%' ORDER BY created_at DESC NULLS LAST LIMIT %s",
+                (max(1, min(int(limit), 200)),),
+            )
+            rows = cur.fetchall() or []
+        return [r[0] for r in rows if r and r[0]]
+    finally:
+        c.close()
+
+
+def _send_via_gmail_api(sender_profile: str, to: str, subject: str, body: str):
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request as GoogleRequest
+    from googleapiclient.discovery import build
+
+    SCOPES = [
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    ]
+
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute("SELECT creds_json FROM profiles WHERE profile = %s", (sender_profile,))
+            row = cur.fetchone()
+        if not row:
+            raise RuntimeError(f"Profile '{sender_profile}' not found in DB.")
+        creds = Credentials.from_authorized_user_info(json.loads(row[0]), scopes=SCOPES)
+    finally:
+        c.close()
+
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleRequest())
+
+    service = build("gmail", "v1", credentials=creds)
+    msg = MIMEText(body or "")
+    msg["to"] = to.strip()
+    msg["subject"] = (subject or "").strip()
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
 
 def send_email(to, subject, body, profile: str | None = None):
-    """Send email through the backend using the profile's stored OAuth creds.
-
-    This avoids local desktop OAuth files (client_secrets_desktop.json).
-    """
     recipients: list[str]
     if isinstance(to, str):
         recipients = [to]
@@ -57,21 +79,16 @@ def send_email(to, subject, body, profile: str | None = None):
     sender_profile = (profile or "").strip()
     if sender_profile:
         if not _is_connected_profile(sender_profile):
-            raise RuntimeError(
-                f"Profile '{sender_profile}' is not connected via Google OAuth. Reconnect and retry."
-            )
+            raise RuntimeError(f"Profile '{sender_profile}' is not connected. Reconnect via /connect/google.")
     else:
-        # Prefer configured OAuth sender profile when available.
-        configured_profile = (PROFILE_EMAIL or "").strip()
-        if configured_profile and _is_connected_profile(configured_profile):
-            sender_profile = configured_profile
+        configured = (PROFILE_EMAIL or "").strip()
+        if configured and _is_connected_profile(configured):
+            sender_profile = configured
         else:
-            # Fallback 1: use a recipient only if that address also has OAuth connected.
             sender_profile = next((r for r in recipients if _is_connected_profile(r)), "")
-            # Fallback 2: use any connected profile from backend (most recent first).
             if not sender_profile:
-                connected_profiles = _list_connected_profiles(limit=20)
-                sender_profile = connected_profiles[0] if connected_profiles else ""
+                connected = _list_connected_profiles(limit=20)
+                sender_profile = connected[0] if connected else ""
 
         if not sender_profile:
             raise RuntimeError(
@@ -80,15 +97,4 @@ def send_email(to, subject, body, profile: str | None = None):
             )
 
     for recipient in recipients:
-        r = requests.post(
-            f"{_backend_base()}/gmail/send",
-            params={
-                "profile": sender_profile,
-                "to": recipient,
-                "subject": subject or "",
-                "body": body or "",
-            },
-            headers=_backend_headers(),
-            timeout=30,
-        )
-        r.raise_for_status()
+        _send_via_gmail_api(sender_profile, recipient, subject, body)

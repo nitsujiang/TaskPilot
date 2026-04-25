@@ -142,6 +142,32 @@ def _ensure_fresh(creds: Credentials) -> Credentials:
     return creds
 
 
+def _db_store_pending_state(state_id: str, email: str):
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO profiles(profile, creds_json, created_at) VALUES (%s, %s, %s) ON CONFLICT (profile) DO UPDATE SET creds_json = EXCLUDED.creds_json",
+                (f"__pending__:{state_id}", json.dumps({"email": email}), datetime.now(timezone.utc).isoformat()),
+            )
+    finally:
+        c.close()
+
+
+def _db_read_pending_state(state_id: str) -> str | None:
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute("SELECT creds_json FROM profiles WHERE profile = %s", (f"__pending__:{state_id}",))
+            row = cur.fetchone()
+            if row:
+                cur.execute("DELETE FROM profiles WHERE profile = %s", (f"__pending__:{state_id}",))
+                return json.loads(row[0]).get("email")
+        return None
+    finally:
+        c.close()
+
+
 def _err_html(message: str):
     escaped = html_module.escape(str(message))
     return make_response(
@@ -390,7 +416,7 @@ def _connect_url(state_id: str) -> str:
 def _poll_email_for_state(state_id: str, timeout_sec: int = 600, poll_every_sec: int = 2) -> str | None:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        email = _PENDING_STATE_PROFILES.pop(state_id, None)
+        email = _PENDING_STATE_PROFILES.pop(state_id, None) or _db_read_pending_state(state_id)
         if email:
             return email
         time.sleep(poll_every_sec)
@@ -1523,10 +1549,47 @@ def google_callback():
         profile = data.get("email", "").strip()
         if not profile:
             return _err_html("Could not get email from Google.")
+        # Store in both memory and DB so polling survives a restart
         _PENDING_STATE_PROFILES[state_id] = profile
+        _db_store_pending_state(state_id, profile)
 
     _save_creds(profile, creds)
     return make_response(f"Connected as {profile}. You can close this tab.", 200)
+
+
+@app.route("/profiles/check")
+def profiles_check():
+    if request.headers.get("X-Backend-Key") != BACKEND_API_KEY:
+        abort(401)
+    profile = request.args.get("profile", "").strip()
+    if not profile:
+        abort(400)
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute("SELECT 1 FROM profiles WHERE profile = %s", (profile,))
+            connected = cur.fetchone() is not None
+        return jsonify({"profile": profile, "connected": connected})
+    finally:
+        c.close()
+
+
+@app.route("/profiles/connected")
+def profiles_connected():
+    if request.headers.get("X-Backend-Key") != BACKEND_API_KEY:
+        abort(401)
+    limit = max(1, min(int(request.args.get("limit", 20)), 200))
+    c = db_conn()
+    try:
+        with c, c.cursor() as cur:
+            cur.execute(
+                "SELECT profile FROM profiles WHERE profile NOT LIKE '__pending__%' ORDER BY created_at DESC NULLS LAST LIMIT %s",
+                (limit,),
+            )
+            rows = cur.fetchall() or []
+        return jsonify({"profiles": [r[0] for r in rows if r and r[0]]})
+    finally:
+        c.close()
 
 
 @app.route("/profiles/by_state")
