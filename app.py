@@ -602,11 +602,11 @@ def _extract_suggested_slots(raw: str, timezone: str) -> list[dict]:
 def _format_slot_options(slots: list[dict], timezone: str) -> str:
     if not slots:
         return "I couldn't format time suggestions right now. Please share a specific date/time."
-    lines = ["Common meeting time suggestions:"]
+    lines = ["*Here are some available time slots:*"]
     for i, s in enumerate(slots, start=1):
         lines.append(f"{i}. {s['label']}")
     lines.append("")
-    lines.append("Reply with `pick 1` ... `pick 5` (or just `1`-`5`).")
+    lines.append("Reply `pick 1`–`pick 5` (or just the number) to book a slot.")
     return "\n".join(lines)
 
 
@@ -977,17 +977,16 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         materials["phase"] = "awaiting_materials"
                         send_slack_message_with_fallback(
                             channel,
-                            "I couldn’t find any relevant files in Drive. "
-                            "Do you want to paste link(s) to include under Materials? (paste links or reply `none`)",
+                            "No relevant files found in Drive. Paste link(s) to include, or reply `none` to skip.",
                             thread_ts=thread_ts,
                         )
                         return
                     materials["phase"] = "awaiting_drive_selection"
                     send_slack_message_with_fallback(
                         channel,
-                        "Here are a few Drive files that might be relevant:\n"
+                        "*Here are some relevant files from Drive:*\n"
                         f"{_render_drive_results(materials['drive_items'])}\n\n"
-                        "Reply with numbers to include (e.g. 1,3) or 'none'.",
+                        "Reply with the numbers to include (e.g. `1,3`) or `none` to skip.",
                         thread_ts=thread_ts,
                     )
                     return
@@ -1002,7 +1001,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                 else:
                     send_slack_message_with_fallback(
                         channel,
-                        "Please paste link(s) to include under Materials, or reply 'none'.",
+                        "Paste link(s) to include in the invite, or reply `none` to skip.",
                         thread_ts=thread_ts,
                     )
                     return
@@ -1011,7 +1010,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     materials["phase"] = "awaiting_drive_consent"
                     send_slack_message_with_fallback(
                         channel,
-                        "Want me to suggest a few relevant files from your Drive for this meeting? (yes/no)",
+                        "Want me to suggest relevant files from Google Drive? Reply `yes` or `no`.",
                         thread_ts=thread_ts,
                     )
                     return
@@ -1030,17 +1029,16 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         materials["phase"] = "awaiting_materials"
                         send_slack_message_with_fallback(
                             channel,
-                            "I couldn’t find any relevant files in Drive. "
-                            "Do you want to paste link(s) to include under Materials? (paste links or reply `none`)",
+                            "No relevant files found in Drive. Paste link(s) to include, or reply `none` to skip.",
                             thread_ts=thread_ts,
                         )
                         return
                     materials["phase"] = "awaiting_drive_selection"
                     send_slack_message_with_fallback(
                         channel,
-                        "Here are a few Drive files that might be relevant:\n"
+                        "*Here are some relevant files from Drive:*\n"
                         f"{_render_drive_results(materials['drive_items'])}\n\n"
-                        "Reply with numbers to include (e.g. 1,3) or 'none'.",
+                        "Reply with the numbers to include (e.g. `1,3`) or `none` to skip.",
                         thread_ts=thread_ts,
                     )
                     return
@@ -1048,7 +1046,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     materials["drive_items"] = []
                     materials["phase"] = "finalize"
                 else:
-                    send_slack_message_with_fallback(channel, "Please reply yes or no.", thread_ts=thread_ts)
+                    send_slack_message_with_fallback(channel, "Please reply `yes` or `no`.", thread_ts=thread_ts)
                     return
 
             phase = materials.get("phase")
@@ -1076,22 +1074,21 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         _calendar_update_description(email, ev_id, full_desc)
                     send_slack_message_with_fallback(
                         channel,
-                        "Updated the calendar invite with Materials.",
+                        ":white_check_mark: Calendar invite updated with materials.",
                         thread_ts=thread_ts,
                     )
                     # First reply was `none` — no Drive step, no extra "more materials" loop.
                     if materials.get("user_skipped_materials"):
                         send_slack_message_with_fallback(
                             channel,
-                            "No links added under Materials. You're all set.",
+                            "No materials added. You're all set!",
                             thread_ts=thread_ts,
                         )
                         materials_sessions.pop(thread_ts, None)
                     else:
                         send_slack_message_with_fallback(
                             channel,
-                            "Want to include more Materials in the invite?\n"
-                            "- Paste link(s), or reply `none`",
+                            "Anything else to add? Paste more link(s) or reply `none` to finish.",
                             thread_ts=thread_ts,
                         )
                         materials_sessions[thread_ts] = {
@@ -1132,7 +1129,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         _calendar_update_description(email, ev_id, updated_desc)
                     send_slack_message_with_fallback(
                         channel,
-                        "Added those links to Materials.",
+                        ":white_check_mark: Links added to the invite.",
                         thread_ts=thread_ts,
                     )
                 except Exception as e:
@@ -1195,9 +1192,9 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                 meeting_followups.pop(thread_ts, None)
                 send_slack_message_with_fallback(
                     channel,
-                    "No conflicts found. "
-                    f"Booked the meeting for {booking['start_iso']} to {booking['end_iso']}.\n"
-                    f"Created on {len(created)} calendar(s).",
+                    f":white_check_mark: *Meeting booked!*\n"
+                    f"*Time:* {booking['start_iso']} – {booking['end_iso']}\n"
+                    f"*Calendars updated:* {len(created)}",
                     thread_ts=thread_ts,
                 )
                 organizer = followup["emails"][0] if followup.get("emails") else None
@@ -1213,16 +1210,16 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     }
                     send_slack_message_with_fallback(
                         channel,
-                        "What links/files should I include under Materials in the invite?\n"
-                        "- Paste link(s), or reply `none`\n"
-                        "- Or reply `suggest` and I’ll suggest a few files from your Drive",
+                        "*Any materials to attach to the invite?*\n"
+                        "• Paste link(s) directly\n"
+                        "• Reply `suggest` to pull relevant files from Google Drive\n"
+                        "• Reply `none` to skip",
                         thread_ts=thread_ts,
                     )
                 return
             send_slack_message_with_fallback(
                 channel,
-                "Please choose a suggested slot by replying `pick 1` to `pick 5` (or just `1`-`5`). "
-                "If you need a fresh list, say `suggest`.",
+                "Reply `pick 1`–`pick 5` (or just the number) to book a slot, or say `suggest` for a fresh list.",
                 thread_ts=thread_ts,
             )
             return
@@ -1260,7 +1257,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             task_data["owners_emails"] = resolve_owner_mentions_to_emails(task_data.get("owners") or [])
             task_id = save_task(task_data)
             print(f"Task saved: {json.dumps(task_data, indent=2)}")
-            send_slack_message_with_fallback(channel, "Got it! Task saved.", thread_ts=thread_ts)
+            send_slack_message_with_fallback(channel, ":white_check_mark: Task saved.", thread_ts=thread_ts)
 
             # --- Send email notification ---
             try:
@@ -1301,7 +1298,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                         state_by_owner[mention] = state_id
                         send_slack_message_with_fallback(
                             channel,
-                            f"{mention} please connect Google so I can suggest meeting times: {_connect_url(state_id)}",
+                            f"{mention} please connect your Google account so I can check your calendar: {_connect_url(state_id)}",
                             thread_ts=thread_ts,
                         )
 
@@ -1393,7 +1390,7 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
 
                     send_slack_message_with_fallback(
                         channel,
-                        "Got it. Do you have a specific time in mind, or should I suggest common free slots?",
+                        "When would you like to meet? Share a specific time (e.g. *Monday 2pm*) or say *suggest* and I'll find common free slots.",
                         thread_ts=thread_ts,
                     )
                     return
