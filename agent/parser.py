@@ -241,13 +241,13 @@ def generate_clarifying_question(task_data: dict) -> str:
                 "owners": "owner(s)",
             }
             asks = [labels[f] for f in core_missing]
-            return f"Got it. Could you share the {_join(asks)}?"
+            return f"Could you share the {_join(asks)}?"
 
         if task_type == "meeting" and "deadline" in missing:
             return "Do you already have a time in mind, or should I suggest common available times?"
 
         if task_type == "todo" and "deadline" in missing:
-            return "Got it. When is this due?"
+            return "When is this due?"
 
     prompt = CLARIFYING_QUESTION_PROMPT.format(
         task_data=json.dumps(task_data, indent=2)
@@ -278,6 +278,11 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
         g = _normalize_urgency_guess(reply)
         if g and "urgency" in (task_data.get("missing_infos") or []):
             task_data["urgency"] = g
+        # Extract explicit Slack mentions even without Gemini.
+        reply_mentions = _extract_owner_mentions_from_text(reply)
+        if reply_mentions:
+            existing = task_data.get("owners") or []
+            task_data["owners"] = list(dict.fromkeys(existing + reply_mentions))
         task_data = _validate_owners(task_data)
         task_data = _recompute_missing_infos(task_data)
         if needs_clarification(task_data):
@@ -298,8 +303,11 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
     prev_missing = task_data.get("missing_infos") or []
     if "description" in prev_missing and not task_data.get("description"):
         stripped = reply.strip()
-        # Only accept as description if it doesn't look like a new standalone command
-        if stripped and not re.search(r"\b(book|schedule|create|remind|meeting|task)\b", stripped, re.IGNORECASE):
+        # Require substance: at least 3 words and not a bare urgency/command reply.
+        if (stripped
+                and len(stripped.split()) >= 3
+                and not re.search(r"\b(book|schedule|create|remind|meeting|task)\b", stripped, re.IGNORECASE)
+                and not _normalize_urgency_guess(stripped)):
             task_data["description"] = stripped
 
     # Owners — append new owners rather than replace

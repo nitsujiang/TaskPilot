@@ -1168,11 +1168,11 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                     booking["end_iso"],
                 )
                 if conflicts:
+                    has_slots = bool(followup.get("suggested_slots"))
+                    tip = "Pick 1-5 from the suggested options, or say `suggest` for new slots." if has_slots else "Share another time or say `suggest` and I'll find free slots."
                     send_slack_message_with_fallback(
                         channel,
-                        "That time conflicts with existing events:\n"
-                        f"{_format_conflicts(conflicts)}\n\n"
-                        "Pick 1-5 from the suggested options, or ask me to suggest again.",
+                        f"That time has a conflict:\n{_format_conflicts(conflicts)}\n\n{tip}",
                         thread_ts=thread_ts,
                     )
                     return
@@ -1250,6 +1250,10 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
             owners = task_data.get("owners") or []
             if requester not in owners:
                 task_data["owners"] = list(dict.fromkeys(owners + [requester]))
+        # Re-sync missing_infos: if owners is now filled, remove "owners" from the list.
+        # (self-reference injection happens after _recompute_missing_infos, so we patch it here)
+        if task_data.get("owners") and "owners" in (task_data.get("missing_infos") or []):
+            task_data["missing_infos"] = [f for f in task_data["missing_infos"] if f != "owners"]
 
         if task_data.get("missing_infos"):
             # Still needs clarification, keep session alive and update last_active
@@ -1333,6 +1337,15 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                                          for sid in state_by_owner.values()}
                         emails_ready = [f.result() for f in as_completed(future_to_sid) if f.result()]
 
+                    # Warn about conflicts but still create — deadline is fixed.
+                    all_conflicts = []
+                    for email in emails_ready:
+                        try:
+                            conflicts = _find_conflicts([email], start_iso, end_iso)
+                            all_conflicts.extend(conflicts)
+                        except Exception:
+                            pass
+
                     created_count = 0
                     for email in emails_ready:
                         try:
@@ -1349,9 +1362,13 @@ def handle_event(text: str, user_id: str, channel: str, thread_ts: str, timezone
                             print(f"Todo calendar create failed for {email}: {e}")
 
                     if created_count:
+                        conflict_note = (
+                            f"\n:warning: Heads up — there's a conflict at that time:\n{_format_conflicts(all_conflicts)}"
+                            if all_conflicts else ""
+                        )
                         send_slack_message_with_fallback(
                             channel,
-                            f":calendar: Calendar reminder added for {created_count} owner(s) at {friendly_time}.",
+                            f":calendar: Calendar reminder added for {created_count} owner(s) at {friendly_time}.{conflict_note}",
                             thread_ts=thread_ts,
                         )
 
