@@ -14,7 +14,7 @@ FIELDS:
 - title: a short, descriptive title. Null if not possible to determine.
 - description: a clear, concise description of what needs to be done. For meetings, use the topic or purpose of the meeting. Null if not mentioned or unclear.
 - owners: a list of who are responsible (preserve Slack mentions like <@U1234> as-is). If a plain name is mentioned without a Slack mention, include it as-is and it will be resolved separately. Null if not mentioned or unclear.
-- deadline: when it needs to be done or when the meeting is scheduled. Use ISO 8601 format (YYYY-MM-DDThh:mm:ss) if possible, otherwise preserve the exact phrase used. Null if not mentioned or unclear.
+- deadline: when it needs to be done or when the meeting is scheduled. Use ISO 8601 format with the user's timezone offset (YYYY-MM-DDThh:mm:ss±HH:MM). Always resolve relative times like "midnight", "end of day", "tomorrow", etc. using the user's timezone ({timezone}), never UTC. Null if not mentioned or unclear.
 - urgency: one of "high", "medium", or "low". Infer from context. Null if not possible to determine.
 - missing_infos: list any of ["task", "title", "description", "owners", "deadline", "urgency"] that are null or unclear enough to need follow-up. Empty list if all fields are clear.
 

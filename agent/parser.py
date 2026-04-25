@@ -5,7 +5,7 @@ from agent.prompts import (
 )
 from utils.slack import send_slack_message_with_fallback, BOT_USER_ID, search_workspace_members
 from utils.gemini import call_gemini, TaskExtraction, take_last_gemini_user_hint
-from utils.time import is_valid_deadline, zoneinfo_or_utc
+from utils.time import is_valid_deadline, zoneinfo_or_utc, localize_naive_deadline
 from datetime import datetime
 import json
 import re
@@ -195,6 +195,8 @@ def extract_task(message: str, timezone: str = "UTC") -> dict:
     if not task_data:
         return {}
 
+    if task_data.get("deadline"):
+        task_data["deadline"] = localize_naive_deadline(task_data["deadline"], timezone)
     if task_data.get("deadline") and not is_valid_deadline(task_data["deadline"]):
         print(f"Invalid deadline format detected: {task_data['deadline']}")
         task_data["deadline"] = None
@@ -322,6 +324,8 @@ def process_clarification(reply: str, task_data: dict, channel: str, timezone: s
         existing_owners = task_data.get("owners") or []
         task_data["owners"] = list(dict.fromkeys(existing_owners + reply_mentions))
 
+    if task_data.get("deadline"):
+        task_data["deadline"] = localize_naive_deadline(task_data["deadline"], timezone)
     if task_data.get("deadline") and not is_valid_deadline(task_data["deadline"]):
         print(f"Invalid deadline format detected: {task_data['deadline']}")
         task_data["deadline"] = None
